@@ -295,6 +295,89 @@ SEMIS = SectorTemplate(
 )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# General — fallback for any sector without a specialized template
+# ═══════════════════════════════════════════════════════════════════════════
+
+GENERAL = SectorTemplate(
+    sector="general",
+    display_name="General",
+    primary_kpis=[
+        KPIDefinition(
+            "revenue_growth",
+            "Revenue Growth YoY",
+            "%",
+            "Total revenue year-over-year growth. Source: 10-K income statement.",
+        ),
+        KPIDefinition(
+            "gross_margin",
+            "Gross Margin",
+            "%",
+            "Gross profit / revenue. Source: 10-K income statement.",
+        ),
+        KPIDefinition(
+            "operating_margin",
+            "Operating Margin",
+            "%",
+            "Operating income / revenue. Source: 10-K income statement.",
+        ),
+        KPIDefinition(
+            "fcf_yield",
+            "FCF Yield",
+            "%",
+            "Free cash flow / total assets (proxy — true yield needs market cap). "
+            "Source: 10-K cash flow statement + balance sheet.",
+        ),
+        KPIDefinition(
+            "roe",
+            "Return on Equity",
+            "%",
+            "Net income / total equity. Source: 10-K income statement + balance sheet.",
+        ),
+        KPIDefinition(
+            "net_debt_ebitda",
+            "Net Debt / EBITDA",
+            "x",
+            "(Total debt - cash) / (operating income + D&A). "
+            "Source: 10-K balance sheet + income statement.",
+            alert_above=4.0,
+        ),
+    ],
+    accounting_adjustments=[
+        AccountingAdjustment(
+            name="Non-recurring items",
+            description=(
+                "Strip restructuring charges, asset impairments, and "
+                "one-time gains/losses to compute normalized earnings."
+            ),
+            computation="normalized_ebitda = reported_ebitda - nonrecurring_items",
+        ),
+    ],
+    default_kill_criteria=[
+        KillCriterionTemplate(
+            "Revenue declines >10% YoY for 2 consecutive quarters",
+            "revenue_growth", "<", -10, "2Q",
+        ),
+        KillCriterionTemplate(
+            "Net Debt / EBITDA > 5x",
+            "net_debt_ebitda", ">", 5.0, "1Q",
+        ),
+        KillCriterionTemplate(
+            "Operating margin negative for 2 consecutive quarters",
+            "operating_margin", "<", 0, "2Q",
+        ),
+    ],
+    primary_valuation="ev_ebitda",
+    valuation_notes=(
+        "EV/EBITDA is the default cross-sector metric. "
+        "Supplement with DCF for stable cash-flow businesses "
+        "and P/B for asset-heavy sectors."
+    ),
+    include_scores=["piotroski_f", "beneish_m"],
+    exclude_scores=[],
+)
+
+
 # ---------------------------------------------------------------------------
 # Registry — look up a template by sector key
 # ---------------------------------------------------------------------------
@@ -302,6 +385,7 @@ SEMIS = SectorTemplate(
 SECTOR_TEMPLATES: dict[str, SectorTemplate] = {
     "saas": SAAS,
     "semis": SEMIS,
+    "general": GENERAL,
 }
 
 

@@ -9,8 +9,11 @@ lookups cheap within a session.
 from __future__ import annotations
 
 import logging
+import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from html.parser import HTMLParser
 from typing import Any
 
 import httpx
@@ -79,6 +82,130 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict | None = None) 
     resp = await client.get(url, params=params, headers=_HEADERS, timeout=30)
     resp.raise_for_status()
     return resp.json()
+
+
+def _filing_base_url(cik: str, accession: str) -> str:
+    """Build the EDGAR archive base URL for a filing's directory."""
+    cik_num = cik.lstrip("0") or "0"
+    acc_no_dashes = accession.replace("-", "")
+    return f"https://www.sec.gov/Archives/edgar/data/{cik_num}/{acc_no_dashes}"
+
+
+# ---------------------------------------------------------------------------
+# HTML → plain text (for stripping SEC filing HTML)
+# ---------------------------------------------------------------------------
+
+class _HTMLTextExtractor(HTMLParser):
+    """Streaming HTML-to-text converter for SEC filings."""
+
+    _BLOCK_TAGS = frozenset(("p", "div", "br", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "li"))
+    _SKIP_TAGS = frozenset(("script", "style", "head"))
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        tag = tag.split(":")[-1].lower()  # handle ix:nonNumeric etc.
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+        elif tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+        elif tag == "td":
+            self._parts.append("\t")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.split(":")[-1].lower()
+        if tag in self._SKIP_TAGS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+        elif tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        text = "".join(self._parts)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r" *\n *", "\n", text)
+        return text.strip()
+
+
+def _strip_html(html: str) -> str:
+    """Convert SEC filing HTML to clean plain text."""
+    parser = _HTMLTextExtractor()
+    parser.feed(html)
+    return parser.get_text()
+
+
+def _xml_text(el: ET.Element | None, path: str) -> str:
+    """Safely extract text from an XML element by path."""
+    if el is None:
+        return ""
+    node = el.find(path)
+    return (node.text or "").strip() if node is not None else ""
+
+
+# ---------------------------------------------------------------------------
+# SEC EDGAR: Company filings (10-K, 10-Q, 8-K)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# SEC EDGAR: Company submission metadata (SIC code, CIK, entity name)
+# ---------------------------------------------------------------------------
+
+# SIC → sector template key.  Only sectors with built templates are mapped.
+SIC_TO_SECTOR: dict[int, str] = {
+    # Software
+    7371: "saas", 7372: "saas", 7373: "saas", 7374: "saas", 7379: "saas",
+    # Semiconductors & related
+    3674: "semis", 3672: "semis", 3679: "semis", 3677: "semis",
+    # Semiconductor equipment
+    3559: "semis", 3825: "semis",
+}
+
+
+async def get_company_submissions(ticker: str) -> DataResult:
+    """
+    Fetch SEC EDGAR company submission metadata.
+
+    Returns entity name, CIK, SIC code, SIC description, fiscal year end,
+    and a mapped sector key (if a template exists for this SIC).
+    """
+    key = _cache_key("submissions", ticker.upper())
+    if key in _cache:
+        return _cache[key]
+
+    cik = await _resolve_cik(ticker)
+
+    async with httpx.AsyncClient() as client:
+        url = f"{EDGAR_SUBMISSIONS}/CIK{cik}.json"
+        submissions = await _get(client, url)
+
+    sic = int(submissions.get("sic", 0) or 0)
+    data = {
+        "cik": cik,
+        "entity_name": submissions.get("name", ticker.upper()),
+        "sic": sic,
+        "sic_description": submissions.get("sicDescription", ""),
+        "fiscal_year_end": submissions.get("fiscalYearEnd", ""),
+        "sector_key": SIC_TO_SECTOR.get(sic),
+    }
+
+    result = DataResult(
+        data=data,
+        source=SourceMeta(
+            source_type="company_metadata",
+            filer=data["entity_name"],
+            url=f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}",
+            description=f"SEC EDGAR submission metadata for {data['entity_name']} (SIC {sic})",
+        ),
+    )
+    _cache[key] = result
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +415,141 @@ async def get_insider_transactions(ticker: str, limit: int = 50) -> DataResult:
 
 
 # ---------------------------------------------------------------------------
+# SEC EDGAR: Parsed insider transaction details (Form 4 XML)
+# ---------------------------------------------------------------------------
+
+def _parse_form4_xml(
+    xml_text: str, accession: str, filing_date: str, cik: str,
+) -> list[dict]:
+    """Parse a Form 4 XML document into structured transaction dicts."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+
+    # Owner info
+    owner = root.find(".//reportingOwner")
+    owner_name = _xml_text(owner, ".//rptOwnerName")
+    is_director = _xml_text(owner, ".//isDirector") in ("1", "true")
+    is_officer = _xml_text(owner, ".//isOfficer") in ("1", "true")
+    officer_title = _xml_text(owner, ".//officerTitle")
+
+    # Check footnotes for 10b5-1 plan language
+    footnote_texts: list[str] = []
+    for fn in root.findall(".//footnotes/footnote"):
+        if fn.text:
+            footnote_texts.append(fn.text)
+    all_fn = " ".join(footnote_texts).lower()
+    is_10b5_1 = "10b5-1" in all_fn or "rule 10b5" in all_fn
+
+    transactions: list[dict] = []
+
+    for txn in root.findall(".//nonDerivativeTransaction"):
+        code = _xml_text(txn, ".//transactionCode")
+        shares_s = _xml_text(txn, ".//transactionShares/value")
+        price_s = _xml_text(txn, ".//transactionPricePerShare/value")
+        post_s = _xml_text(txn, ".//sharesOwnedFollowingTransaction/value")
+        txn_date = _xml_text(txn, ".//transactionDate/value")
+        acq_disp = _xml_text(txn, ".//transactionAcquiredDisposedCode/value")
+
+        shares = float(shares_s) if shares_s else None
+        price = float(price_s) if price_s else None
+        post_shares = float(post_s) if post_s else None
+        value = round(shares * price, 2) if shares and price else None
+
+        transactions.append({
+            "owner_name": owner_name,
+            "owner_title": officer_title or ("Director" if is_director else ""),
+            "is_director": is_director,
+            "is_officer": is_officer,
+            "transaction_date": txn_date or filing_date,
+            "transaction_code": code,  # P=purchase, S=sale, A=award, M=exercise
+            "acquired_or_disposed": acq_disp,  # A=acquired, D=disposed
+            "shares": shares,
+            "price_per_share": price,
+            "value": value,
+            "shares_owned_after": post_shares,
+            "is_10b5_1": is_10b5_1,
+            "footnotes": footnote_texts,
+            "filing_date": filing_date,
+            "accession_number": accession,
+            "cik": cik,
+        })
+
+    return transactions
+
+
+async def get_insider_details(ticker: str, limit: int = 15) -> DataResult:
+    """
+    Fetch and parse Form 4 XML filings for structured insider transaction data.
+
+    Returns full transaction details: owner name/title, buy/sell, shares, price,
+    value, shares remaining, and 10b5-1 flag.
+    """
+    key = _cache_key("insider_details", ticker.upper(), str(limit))
+    if key in _cache:
+        return _cache[key]
+
+    cik = await _resolve_cik(ticker)
+
+    # Get the list of Form 4 filing metadata
+    filings_result = await get_insider_transactions(ticker, limit=limit)
+    form4_filings = [
+        f for f in filings_result.data if f.get("form_type") == "4"
+    ][:limit]
+
+    all_transactions: list[dict] = []
+
+    async with httpx.AsyncClient() as client:
+        for filing in form4_filings:
+            accession = filing["accession_number"]
+            base = _filing_base_url(cik, accession)
+
+            try:
+                # Fetch filing index to find the XML file
+                idx = await _get(client, f"{base}/index.json")
+                items = idx.get("directory", {}).get("item", [])
+                xml_files = [
+                    i for i in items
+                    if i["name"].endswith(".xml")
+                    and not i["name"].startswith("R")
+                    and i["name"] != "primary_doc.xml"
+                    and "FilingSummary" not in i["name"]
+                ]
+                if not xml_files:
+                    continue
+
+                xml_url = f"{base}/{xml_files[0]['name']}"
+                resp = await client.get(xml_url, headers=_HEADERS, timeout=15)
+                resp.raise_for_status()
+
+                parsed = _parse_form4_xml(
+                    resp.text, accession, filing["filing_date"], cik,
+                )
+                all_transactions.extend(parsed)
+            except Exception as exc:
+                logger.warning("Failed to parse Form 4 %s: %s", accession, exc)
+                continue
+
+    result = DataResult(
+        data=all_transactions,
+        source=SourceMeta(
+            source_type="form4_parsed",
+            filer=ticker.upper(),
+            section="Statement of Changes in Beneficial Ownership",
+            url=f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type=4&dateb=&owner=include&count=40",
+            description=f"Parsed Form 4 transactions for {ticker.upper()} ({len(all_transactions)} transactions from {len(form4_filings)} filings)",
+        ),
+    )
+    _cache[key] = result
+    return result
+
+
+# ---------------------------------------------------------------------------
 # SEC EDGAR: 13F institutional holdings
+# TODO: Parse 13F info table XML for actual position data (shares, value).
+#       Current version returns filing metadata only. The holder map is
+#       context, not the core product — full parsing ships in a later phase.
 # ---------------------------------------------------------------------------
 
 async def get_13f_holdings(ticker: str, limit: int = 20) -> DataResult:
@@ -323,11 +584,15 @@ async def get_13f_holdings(ticker: str, limit: int = 20) -> DataResult:
     holders: list[dict] = []
     for hit in hits:
         src = hit.get("_source", {})
+        # display_names is a list like ["Fund Name  (CIK 0001234567)"]
+        names = src.get("display_names", [])
+        filer_name = names[0].split("(CIK")[0].strip() if names else None
         holders.append({
-            "filer_name": src.get("entity_name"),
+            "filer_name": filer_name,
             "form_type": "13F-HR",
             "filing_date": src.get("file_date"),
-            "accession_number": src.get("file_num"),
+            "accession_number": src.get("adsh"),
+            "period_ending": src.get("period_ending"),
         })
 
     result = DataResult(
@@ -479,30 +744,54 @@ async def get_prices(
 
 async def get_filing_text(accession_number: str, cik: str) -> DataResult:
     """
-    Download the full text of a specific filing by accession number.
+    Download and extract the full text of a specific SEC filing.
 
-    Returns the raw text content (HTML stripped where possible) and the
-    source URL for citation.
+    Fetches the filing index JSON to identify the primary document,
+    downloads the HTML, strips tags, and returns clean plain text
+    suitable for LLM analysis.
     """
     key = _cache_key("filing_text", accession_number)
     if key in _cache:
         return _cache[key]
 
-    acc_no_dashes = accession_number.replace("-", "")
-    index_url = (
-        f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_no_dashes}/"
-        f"{accession_number}-index.htm"
-    )
+    base = _filing_base_url(cik, accession_number)
 
     async with httpx.AsyncClient() as client:
-        # Get the filing index to find the primary document
-        resp = await client.get(index_url, headers=_HEADERS, timeout=30)
-        resp.raise_for_status()
-        index_html = resp.text
+        # Fetch the filing index JSON to find the primary document
+        index_url = f"{base}/index.json"
+        idx = await _get(client, index_url)
+        items = idx.get("directory", {}).get("item", [])
 
-        # The primary .htm document is typically the largest file listed
-        # For now, return the index; a full parser would extract and clean the doc
-        text = index_html
+        # Find the primary HTML document (largest .htm file, skip R* report files)
+        htm_files = [
+            i for i in items
+            if i.get("name", "").lower().endswith((".htm", ".html"))
+            and not i["name"].startswith("R")
+        ]
+        htm_files.sort(
+            key=lambda x: int(str(x.get("size", "0")).replace(",", "") or "0"),
+            reverse=True,
+        )
+
+        if not htm_files:
+            return DataResult(
+                data="",
+                source=SourceMeta(
+                    source_type="filing_text", filer=cik,
+                    accession_number=accession_number, url=base,
+                    description=f"No HTML document found in {accession_number}",
+                ),
+            )
+
+        primary_doc = htm_files[0]["name"]
+        doc_url = f"{base}/{primary_doc}"
+
+        # Fetch the actual filing document (can be large — 60s timeout)
+        resp = await client.get(doc_url, headers=_HEADERS, timeout=60)
+        resp.raise_for_status()
+        html = resp.text
+
+    text = _strip_html(html)
 
     result = DataResult(
         data=text,
@@ -510,8 +799,8 @@ async def get_filing_text(accession_number: str, cik: str) -> DataResult:
             source_type="filing_text",
             filer=cik,
             accession_number=accession_number,
-            url=index_url,
-            description=f"Full text of filing {accession_number}",
+            url=doc_url,
+            description=f"Full text of {primary_doc} ({accession_number})",
         ),
     )
     _cache[key] = result
@@ -672,15 +961,21 @@ XBRL_FIELD_MAP: dict[str, tuple[list[str], str]] = {
 # SEC XBRL: Company financial facts (primary financials source)
 # ---------------------------------------------------------------------------
 
-async def get_company_facts(ticker: str, periods: int = 5) -> DataResult:
+async def get_company_facts(
+    ticker: str, periods: int = 5, include_quarterly: bool = False,
+) -> DataResult:
     """
     Fetch structured financial data from SEC XBRL companyfacts.
 
     Returns normalized field names (revenue, total_assets, operating_cash_flow,
     etc.) with up to *periods* annual values each, most recent first.
     Every value carries its accession number and filing date for citation.
+
+    If *include_quarterly* is True, also returns a "quarterly" dict with the
+    most recent quarterly entries (from 10-Q filings).  Quarterly entries use
+    a composite key "FY{year}-{period}" for dedup (e.g. "2025-Q3").
     """
-    key = _cache_key("companyfacts", ticker.upper(), str(periods))
+    key = _cache_key("companyfacts", ticker.upper(), str(periods), str(include_quarterly))
     if key in _cache:
         return _cache[key]
 
@@ -695,6 +990,7 @@ async def get_company_facts(ticker: str, periods: int = 5) -> DataResult:
     dei = raw.get("facts", {}).get("dei", {})
 
     facts: dict[str, list[dict]] = {}
+    quarterly: dict[str, list[dict]] = {}
 
     for field_name, (xbrl_concepts, unit_key) in XBRL_FIELD_MAP.items():
         for concept in xbrl_concepts:
@@ -705,7 +1001,7 @@ async def get_company_facts(ticker: str, periods: int = 5) -> DataResult:
 
             entries = concept_data.get("units", {}).get(unit_key, [])
 
-            # Filter to annual filings
+            # --- Annual entries ---
             annual = [
                 e for e in entries
                 if e.get("fp") == "FY"
@@ -720,29 +1016,63 @@ async def get_company_facts(ticker: str, periods: int = 5) -> DataResult:
                 if existing is None or e.get("filed", "") > existing.get("filed", ""):
                     by_fy[fy] = e
 
-            # Sort by fiscal year descending, take most recent N
             sorted_entries = sorted(
                 by_fy.values(), key=lambda e: e.get("fy", 0), reverse=True
             )[:periods]
 
+            def _format_entry(e: dict) -> dict:
+                return {
+                    "value": e["val"],
+                    "period_end": e.get("end"),
+                    "fiscal_year": e.get("fy"),
+                    "fiscal_period": e.get("fp"),
+                    "form": e.get("form"),
+                    "accession": e.get("accn"),
+                    "filed": e.get("filed"),
+                    "xbrl_concept": concept,
+                }
+
             if sorted_entries:
-                facts[field_name] = [
-                    {
-                        "value": e["val"],
-                        "period_end": e.get("end"),
-                        "fiscal_year": e.get("fy"),
-                        "fiscal_period": e.get("fp"),
-                        "form": e.get("form"),
-                        "accession": e.get("accn"),
-                        "filed": e.get("filed"),
-                        "xbrl_concept": concept,
-                    }
-                    for e in sorted_entries
+                facts[field_name] = [_format_entry(e) for e in sorted_entries]
+
+            # --- Quarterly entries (10-Q only) ---
+            if include_quarterly:
+                qtr = [
+                    e for e in entries
+                    if e.get("fp") in ("Q1", "Q2", "Q3")
+                    and e.get("form") in ("10-Q", "10-Q/A")
                 ]
+
+                # Dedup by (fiscal_year, fiscal_period) — keep most recent filing
+                by_fyq: dict[str, dict] = {}
+                for e in qtr:
+                    qkey = f"{e.get('fy', 0)}-{e.get('fp', '')}"
+                    existing = by_fyq.get(qkey)
+                    if existing is None or e.get("filed", "") > existing.get("filed", ""):
+                        by_fyq[qkey] = e
+
+                sorted_qtr = sorted(
+                    by_fyq.values(),
+                    key=lambda e: (e.get("fy", 0), e.get("fp", "")),
+                    reverse=True,
+                )[: periods * 4]
+
+                if sorted_qtr:
+                    quarterly[field_name] = [_format_entry(e) for e in sorted_qtr]
+
+            if sorted_entries or (include_quarterly and quarterly.get(field_name)):
                 break  # Found data for this field, stop trying alternatives
 
+    data: dict[str, Any] = {
+        "entity_name": entity_name,
+        "cik": cik,
+        "facts": facts,
+    }
+    if include_quarterly:
+        data["quarterly"] = quarterly
+
     result = DataResult(
-        data={"entity_name": entity_name, "cik": cik, "facts": facts},
+        data=data,
         source=SourceMeta(
             source_type="xbrl_companyfacts",
             filer=entity_name,
@@ -760,44 +1090,62 @@ async def get_company_facts(ticker: str, periods: int = 5) -> DataResult:
 
 async def get_quote(ticker: str) -> DataResult:
     """
-    Fetch current price via Yahoo Finance v8 chart endpoint (no key required).
+    Fetch current price with fallback chain:
+      1. Yahoo Finance v8 chart (query1)
+      2. Yahoo Finance v8 chart (query2 — separate rate-limit pool)
+      3. SEC XBRL shares_outstanding × last known price is handled upstream
+         in quant.py if this function returns price=None.
 
-    Returns price, currency, and shares_outstanding / market_cap when available.
+    Returns price, currency.
     """
     key = _cache_key("quote", ticker.upper())
     if key in _cache:
         return _cache[key]
 
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-    params = {"interval": "1d", "range": "1d"}
+    params = {"interval": "1d", "range": "5d"}
     yf_headers = {
         "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
         ),
     }
 
     price = None
     currency = "USD"
+    source_desc = f"Quote unavailable for {ticker.upper()}"
 
+    # Try both Yahoo query hosts (separate rate-limit pools)
     async with httpx.AsyncClient() as client:
-        try:
-            resp = await client.get(url, params=params, headers=yf_headers, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            meta = data["chart"]["result"][0]["meta"]
-            price = meta.get("regularMarketPrice") or meta.get("previousClose")
-            currency = meta.get("currency", "USD")
-        except httpx.HTTPError as exc:
-            logger.warning("Yahoo Finance unavailable (%s), price will be None", exc)
+        for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+            url = f"https://{host}/v8/finance/chart/{ticker}"
+            try:
+                resp = await client.get(url, params=params, headers=yf_headers, timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+                meta = data["chart"]["result"][0]["meta"]
+                price = meta.get("regularMarketPrice") or meta.get("previousClose")
+                currency = meta.get("currency", "USD")
+                if price is not None:
+                    source_desc = f"Real-time quote for {ticker.upper()} via Yahoo Finance ({host})"
+                    break
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429:
+                    logger.info("Yahoo %s rate-limited for %s, trying next host", host, ticker)
+                    continue
+                logger.warning("Yahoo %s error for %s: %s", host, ticker, exc)
+            except Exception as exc:
+                logger.warning("Yahoo %s failed for %s: %s", host, ticker, exc)
+
+    if price is None:
+        logger.warning("All quote sources failed for %s — price will be None", ticker)
 
     result = DataResult(
         data={"price": price, "currency": currency},
         source=SourceMeta(
             source_type="price",
             filer=ticker.upper(),
-            description=f"Real-time quote for {ticker.upper()} via Yahoo Finance"
-            if price else f"Quote unavailable for {ticker.upper()}",
+            description=source_desc,
         ),
     )
     _cache[key] = result

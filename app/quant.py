@@ -51,11 +51,16 @@ class EVBuild:
 
 @dataclass
 class MarketImplied:
-    implied_growth_rate: float
+    implied_fcf_growth_10yr: float  # 10yr constant FCF growth that equates DCF to EV
     wacc: float
     wacc_build: str  # "rf 4.1% + beta 1.0 x ERP 4.5% = 8.6%"
     fcf_used: float
-    fcf_source: SourceMeta
+    fcf_computation: str  # "FCF = OCF ($X) - CapEx ($Y) = $Z"
+    ocf_used: float
+    ocf_source: SourceMeta
+    capex_used: float
+    capex_source: SourceMeta
+    fcf_source: SourceMeta  # combined citation
     terminal_growth: float
     ev_used: float
     sensitivity: dict[str, float]  # {"wacc +1%": growth, "wacc -1%": growth}
@@ -70,6 +75,10 @@ class KPIResult:
     period: str  # "FY2025"
     prior_value: float | None = None
     yoy_delta: float | None = None
+    qoq_value: float | None = None  # most recent quarter
+    qoq_prior: float | None = None  # quarter before that
+    qoq_delta: float | None = None
+    qoq_period: str | None = None  # "Q3 FY2025"
     source: SourceMeta | None = None
     computation: str | None = None
     note: str | None = None  # e.g. "requires filing text extraction"
@@ -190,17 +199,142 @@ def solve_implied_growth(
 
 
 # ---------------------------------------------------------------------------
+# Quarterly fact helpers
+#
+# IMPORTANT: XBRL flow items (revenue, income, cash flow) are CUMULATIVE
+# year-to-date in 10-Q filings. Q1=$3B, Q2=$6B (=Q1+Q2), Q3=$9B (=Q1+Q2+Q3).
+# Balance sheet items (assets, inventory) are point-in-time.
+#
+# _standalone_q() converts cumulative YTD → discrete quarter values.
+# ---------------------------------------------------------------------------
+
+# Fields that are cumulative YTD in 10-Q filings (flow items).
+# Balance sheet fields are NOT cumulative — they're point-in-time snapshots.
+_CUMULATIVE_FIELDS = frozenset({
+    "revenue", "cost_of_revenue", "gross_profit", "operating_income",
+    "net_income", "research_and_development", "sga", "sbc",
+    "interest_expense", "income_tax", "depreciation_amortization",
+    "operating_cash_flow", "capex", "dividends_paid", "share_repurchases",
+})
+
+
+def _qval(quarterly: dict, field_name: str, idx: int = 0) -> float | None:
+    """Get raw value at index *idx* (0 = most recent quarter) from quarterly dict."""
+    entries = quarterly.get(field_name, [])
+    if idx < len(entries):
+        return entries[idx]["value"]
+    return None
+
+
+def _qentry(quarterly: dict, field_name: str, idx: int = 0) -> dict | None:
+    entries = quarterly.get(field_name, [])
+    if idx < len(entries):
+        return entries[idx]
+    return None
+
+
+def _standalone_q(quarterly: dict, field_name: str, idx: int = 0) -> float | None:
+    """
+    Get the STANDALONE quarter value for a field.
+
+    For cumulative flow items (revenue, COGS, etc.), computes:
+      Q3 standalone = Q3_cumulative - Q2_cumulative (same fiscal year)
+      Q1 standalone = Q1_cumulative (no prior quarter to subtract)
+
+    For balance sheet items, returns the raw value (already point-in-time).
+    """
+    if field_name not in _CUMULATIVE_FIELDS:
+        return _qval(quarterly, field_name, idx)
+
+    entries = quarterly.get(field_name, [])
+    if idx >= len(entries):
+        return None
+
+    entry = entries[idx]
+    val = entry["value"]
+    fp = entry.get("fiscal_period", "")
+    fy = entry.get("fiscal_year", 0)
+
+    if fp == "Q1":
+        return val  # Q1 cumulative IS the standalone value
+
+    # Find the prior quarter in the same fiscal year
+    prior_fp = {"Q2": "Q1", "Q3": "Q2"}.get(fp)
+    if prior_fp is None:
+        return val  # unknown period, return as-is
+
+    for e in entries:
+        if e.get("fiscal_year") == fy and e.get("fiscal_period") == prior_fp:
+            return val - e["value"]
+
+    # Can't find prior quarter — return None rather than misleading cumulative
+    return None
+
+
+def _standalone_qentry(quarterly: dict, field_name: str, idx: int = 0) -> dict | None:
+    """Get the entry metadata for the quarter at idx."""
+    return _qentry(quarterly, field_name, idx)
+
+
+def _find_yago_q(quarterly: dict, field_name: str, idx: int = 0) -> float | None:
+    """
+    Find the STANDALONE value for the same quarter one year ago.
+
+    E.g., if idx=0 is Q3 FY2026, find Q3 FY2025 and return its standalone value.
+    """
+    entries = quarterly.get(field_name, [])
+    if idx >= len(entries):
+        return None
+
+    target = entries[idx]
+    target_fp = target.get("fiscal_period", "")
+    target_fy = target.get("fiscal_year", 0)
+    prior_fy = target_fy - 1
+
+    # Find the same quarter in prior year
+    for i, e in enumerate(entries):
+        if e.get("fiscal_year") == prior_fy and e.get("fiscal_period") == target_fp:
+            return _standalone_q(quarterly, field_name, i)
+
+    return None
+
+
+def _qoq_margin(quarterly: dict, numerator_field: str, denominator_field: str) -> tuple[float | None, float | None, str | None]:
+    """
+    Compute a ratio KPI using STANDALONE quarter values for the two most
+    recent quarters.  Returns (current_ratio, prior_ratio, period_label).
+    """
+    n0 = _standalone_q(quarterly, numerator_field, 0)
+    n1 = _standalone_q(quarterly, numerator_field, 1)
+    d0 = _standalone_q(quarterly, denominator_field, 0)
+    d1 = _standalone_q(quarterly, denominator_field, 1)
+    cur = _safe_div(n0, d0)
+    prior = _safe_div(n1, d1)
+    if cur is not None:
+        cur *= 100
+    if prior is not None:
+        prior *= 100
+    entry = _qentry(quarterly, numerator_field, 0) or _qentry(quarterly, denominator_field, 0)
+    period = f"{entry.get('fiscal_period', '?')} FY{entry.get('fiscal_year', '?')}" if entry else None
+    return cur, prior, period
+
+
+# ---------------------------------------------------------------------------
 # KPI computation dispatch
 # ---------------------------------------------------------------------------
 
-def _compute_kpi(kpi_id: str, facts: dict, entity_name: str, cik: str) -> KPIResult | None:
+def _compute_kpi(
+    kpi_id: str, facts: dict, entity_name: str, cik: str,
+    quarterly: dict | None = None,
+) -> KPIResult | None:
     """Compute a single KPI from XBRL facts. Returns None if not computable."""
+    q = quarterly or {}
+
     # Gross margin
     if kpi_id == "gross_margin":
         gp = _val(facts, "gross_profit")
         rev = _val(facts, "revenue")
         if gp is None and rev is not None:
-            # Try computing: revenue - cost_of_revenue
             cor = _val(facts, "cost_of_revenue")
             if cor is not None:
                 gp = rev - cor
@@ -213,11 +347,17 @@ def _compute_kpi(kpi_id: str, facts: dict, entity_name: str, cik: str) -> KPIRes
         if prior_val is not None:
             prior_val *= 100
         entry = _entry(facts, "gross_profit") or _entry(facts, "revenue")
+        # QoQ
+        qcur, qprior, qperiod = _qoq_margin(q, "gross_profit", "revenue")
         return KPIResult(
             kpi_id="gross_margin", label="Gross Margin", value=val, unit="%",
             period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
             prior_value=prior_val,
             yoy_delta=round(val - prior_val, 2) if val is not None and prior_val is not None else None,
+            qoq_value=round(qcur, 2) if qcur is not None else None,
+            qoq_prior=round(qprior, 2) if qprior is not None else None,
+            qoq_delta=round(qcur - qprior, 2) if qcur is not None and qprior is not None else None,
+            qoq_period=qperiod,
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"gross_profit ({_fmt(gp or 0)}) / revenue ({_fmt(rev or 0)})",
         )
@@ -228,9 +368,29 @@ def _compute_kpi(kpi_id: str, facts: dict, entity_name: str, cik: str) -> KPIRes
         rev_1 = _val(facts, "revenue", 1)
         val = ((rev_0 / rev_1) - 1) * 100 if rev_0 and rev_1 and rev_1 != 0 else None
         entry = _entry(facts, "revenue")
+
+        # QoQ: compare the YoY growth rate of the most recent quarter
+        # to the YoY growth rate of the prior quarter.
+        # E.g., Q3 FY2026 YoY growth = standalone_Q3_2026 / standalone_Q3_2025 - 1
+        #        Q2 FY2026 YoY growth = standalone_Q2_2026 / standalone_Q2_2025 - 1
+        # QoQ delta = Q3 growth - Q2 growth
+        q0_standalone = _standalone_q(q, "revenue", 0)
+        q0_yago = _find_yago_q(q, "revenue", 0)
+        qgrowth = ((q0_standalone / q0_yago) - 1) * 100 if q0_standalone and q0_yago and q0_yago != 0 else None
+
+        q1_standalone = _standalone_q(q, "revenue", 1)
+        q1_yago = _find_yago_q(q, "revenue", 1)
+        qgrowth_prior = ((q1_standalone / q1_yago) - 1) * 100 if q1_standalone and q1_yago and q1_yago != 0 else None
+
+        qe = _qentry(q, "revenue", 0)
+        qperiod = f"{qe.get('fiscal_period', '?')} FY{qe.get('fiscal_year', '?')}" if qe else None
         return KPIResult(
             kpi_id="revenue_growth", label="Revenue Growth YoY", value=round(val, 2) if val else None,
             unit="%", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
+            qoq_value=round(qgrowth, 2) if qgrowth is not None else None,
+            qoq_prior=round(qgrowth_prior, 2) if qgrowth_prior is not None else None,
+            qoq_delta=round(qgrowth - qgrowth_prior, 2) if qgrowth is not None and qgrowth_prior is not None else None,
+            qoq_period=qperiod,
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"({_fmt(rev_0 or 0)} / {_fmt(rev_1 or 0)} - 1)" if rev_0 and rev_1 else None,
         )
@@ -243,9 +403,14 @@ def _compute_kpi(kpi_id: str, facts: dict, entity_name: str, cik: str) -> KPIRes
         if val is not None:
             val *= 100
         entry = _entry(facts, "sbc") or _entry(facts, "revenue")
+        qcur, qprior, qperiod = _qoq_margin(q, "sbc", "revenue")
         return KPIResult(
             kpi_id="sbc_revenue", label="SBC / Revenue", value=round(val, 2) if val else None,
             unit="%", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
+            qoq_value=round(qcur, 2) if qcur is not None else None,
+            qoq_prior=round(qprior, 2) if qprior is not None else None,
+            qoq_delta=round(qcur - qprior, 2) if qcur is not None and qprior is not None else None,
+            qoq_period=qperiod,
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"sbc ({_fmt(sbc or 0)}) / revenue ({_fmt(rev or 0)})" if sbc and rev else None,
         )
@@ -260,9 +425,30 @@ def _compute_kpi(kpi_id: str, facts: dict, entity_name: str, cik: str) -> KPIRes
         if val is not None:
             val *= 100
         entry = _entry(facts, "operating_cash_flow") or _entry(facts, "revenue")
+        # QoQ FCF margin — use standalone quarter values
+        qocf0 = _standalone_q(q, "operating_cash_flow", 0)
+        qocf1 = _standalone_q(q, "operating_cash_flow", 1)
+        qcap0 = _standalone_q(q, "capex", 0)
+        qcap1 = _standalone_q(q, "capex", 1)
+        qrev0 = _standalone_q(q, "revenue", 0)
+        qrev1 = _standalone_q(q, "revenue", 1)
+        qfcf0 = (qocf0 - qcap0) if qocf0 is not None and qcap0 is not None else None
+        qfcf1 = (qocf1 - qcap1) if qocf1 is not None and qcap1 is not None else None
+        qcur = _safe_div(qfcf0, qrev0)
+        qprior = _safe_div(qfcf1, qrev1)
+        if qcur is not None:
+            qcur *= 100
+        if qprior is not None:
+            qprior *= 100
+        qe = _qentry(q, "operating_cash_flow", 0)
+        qperiod = f"{qe.get('fiscal_period', '?')} FY{qe.get('fiscal_year', '?')}" if qe else None
         return KPIResult(
             kpi_id="fcf_margin", label="FCF Margin", value=round(val, 2) if val else None,
             unit="%", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
+            qoq_value=round(qcur, 2) if qcur is not None else None,
+            qoq_prior=round(qprior, 2) if qprior is not None else None,
+            qoq_delta=round(qcur - qprior, 2) if qcur is not None and qprior is not None else None,
+            qoq_period=qperiod,
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"(OCF {_fmt(ocf or 0)} - capex {_fmt(capex or 0)}) / revenue {_fmt(rev or 0)}" if all([ocf, capex, rev]) else None,
         )
@@ -296,11 +482,23 @@ def _compute_kpi(kpi_id: str, facts: dict, entity_name: str, cik: str) -> KPIRes
         prior_cogs = _val(facts, "cost_of_revenue", 1)
         prior_val = (prior_inv / (prior_cogs / 365)) if prior_inv and prior_cogs and prior_cogs != 0 else None
         entry = _entry(facts, "inventory")
+        # QoQ — inventory is point-in-time, but COGS is cumulative → use standalone
+        qinv0, qinv1 = _qval(q, "inventory", 0), _qval(q, "inventory", 1)
+        qcogs0 = _standalone_q(q, "cost_of_revenue", 0)
+        qcogs1 = _standalone_q(q, "cost_of_revenue", 1)
+        qval = (qinv0 / (qcogs0 * 4 / 365)) if qinv0 and qcogs0 and qcogs0 != 0 else None
+        qval_prior = (qinv1 / (qcogs1 * 4 / 365)) if qinv1 and qcogs1 and qcogs1 != 0 else None
+        qe = _qentry(q, "inventory", 0)
+        qperiod = f"{qe.get('fiscal_period', '?')} FY{qe.get('fiscal_year', '?')}" if qe else None
         return KPIResult(
             kpi_id="inventory_days", label="Inventory Days", value=round(val, 1) if val else None,
             unit="days", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
             prior_value=round(prior_val, 1) if prior_val else None,
             yoy_delta=round(val - prior_val, 1) if val is not None and prior_val is not None else None,
+            qoq_value=round(qval, 1) if qval is not None else None,
+            qoq_prior=round(qval_prior, 1) if qval_prior is not None else None,
+            qoq_delta=round(qval - qval_prior, 1) if qval is not None and qval_prior is not None else None,
+            qoq_period=qperiod,
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"inventory ({_fmt(inv or 0)}) / (COGS ({_fmt(cogs or 0)}) / 365)" if inv and cogs else None,
         )
@@ -313,9 +511,14 @@ def _compute_kpi(kpi_id: str, facts: dict, entity_name: str, cik: str) -> KPIRes
         if val is not None:
             val *= 100
         entry = _entry(facts, "capex") or _entry(facts, "revenue")
+        qcur, qprior, qperiod = _qoq_margin(q, "capex", "revenue")
         return KPIResult(
             kpi_id="capex_intensity", label="CapEx / Revenue", value=round(val, 2) if val else None,
             unit="%", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
+            qoq_value=round(qcur, 2) if qcur is not None else None,
+            qoq_prior=round(qprior, 2) if qprior is not None else None,
+            qoq_delta=round(qcur - qprior, 2) if qcur is not None and qprior is not None else None,
+            qoq_period=qperiod,
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"capex ({_fmt(capex or 0)}) / revenue ({_fmt(rev or 0)})" if capex and rev else None,
         )
@@ -328,11 +531,108 @@ def _compute_kpi(kpi_id: str, facts: dict, entity_name: str, cik: str) -> KPIRes
         if val is not None:
             val *= 100
         entry = _entry(facts, "research_and_development") or _entry(facts, "revenue")
+        qcur, qprior, qperiod = _qoq_margin(q, "research_and_development", "revenue")
         return KPIResult(
             kpi_id="r_and_d_intensity", label="R&D / Revenue", value=round(val, 2) if val else None,
             unit="%", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
+            qoq_value=round(qcur, 2) if qcur is not None else None,
+            qoq_prior=round(qprior, 2) if qprior is not None else None,
+            qoq_delta=round(qcur - qprior, 2) if qcur is not None and qprior is not None else None,
+            qoq_period=qperiod,
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"R&D ({_fmt(rnd or 0)}) / revenue ({_fmt(rev or 0)})" if rnd and rev else None,
+        )
+
+    # Operating margin
+    if kpi_id == "operating_margin":
+        oi = _val(facts, "operating_income")
+        rev = _val(facts, "revenue")
+        val = _safe_div(oi, rev)
+        if val is not None:
+            val *= 100
+        prior_oi = _val(facts, "operating_income", 1)
+        prior_rev = _val(facts, "revenue", 1)
+        prior_val = _safe_div(prior_oi, prior_rev)
+        if prior_val is not None:
+            prior_val *= 100
+        entry = _entry(facts, "operating_income") or _entry(facts, "revenue")
+        qcur, qprior, qperiod = _qoq_margin(q, "operating_income", "revenue")
+        return KPIResult(
+            kpi_id="operating_margin", label="Operating Margin", value=round(val, 2) if val is not None else None,
+            unit="%", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
+            prior_value=round(prior_val, 2) if prior_val is not None else None,
+            yoy_delta=round(val - prior_val, 2) if val is not None and prior_val is not None else None,
+            qoq_value=round(qcur, 2) if qcur is not None else None,
+            qoq_prior=round(qprior, 2) if qprior is not None else None,
+            qoq_delta=round(qcur - qprior, 2) if qcur is not None and qprior is not None else None,
+            qoq_period=qperiod,
+            source=_source_from_entry(entry, entity_name, cik),
+            computation=f"operating_income ({_fmt(oi or 0)}) / revenue ({_fmt(rev or 0)})" if oi and rev else None,
+        )
+
+    # FCF yield (FCF / market cap proxy — uses EV if market cap unavailable)
+    if kpi_id == "fcf_yield":
+        ocf = _val(facts, "operating_cash_flow")
+        capex = _val(facts, "capex")
+        ta = _val(facts, "total_assets")
+        fcf = (ocf - capex) if ocf is not None and capex is not None else None
+        # Use total assets as a rough denominator — market cap isn't in XBRL
+        val = _safe_div(fcf, ta)
+        if val is not None:
+            val *= 100
+        entry = _entry(facts, "operating_cash_flow") or _entry(facts, "total_assets")
+        return KPIResult(
+            kpi_id="fcf_yield", label="FCF Yield (vs Total Assets)",
+            value=round(val, 2) if val is not None else None,
+            unit="%", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
+            source=_source_from_entry(entry, entity_name, cik),
+            computation=f"FCF ({_fmt(fcf or 0)}) / total_assets ({_fmt(ta or 0)})" if fcf and ta else None,
+            note="Uses total assets as denominator — true FCF yield requires live market cap",
+        )
+
+    # Return on equity
+    if kpi_id == "roe":
+        ni = _val(facts, "net_income")
+        eq = _val(facts, "total_equity")
+        val = _safe_div(ni, eq)
+        if val is not None:
+            val *= 100
+        prior_ni = _val(facts, "net_income", 1)
+        prior_eq = _val(facts, "total_equity", 1)
+        prior_val = _safe_div(prior_ni, prior_eq)
+        if prior_val is not None:
+            prior_val *= 100
+        entry = _entry(facts, "net_income") or _entry(facts, "total_equity")
+        return KPIResult(
+            kpi_id="roe", label="Return on Equity", value=round(val, 2) if val is not None else None,
+            unit="%", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
+            prior_value=round(prior_val, 2) if prior_val is not None else None,
+            yoy_delta=round(val - prior_val, 2) if val is not None and prior_val is not None else None,
+            source=_source_from_entry(entry, entity_name, cik),
+            computation=f"net_income ({_fmt(ni or 0)}) / total_equity ({_fmt(eq or 0)})" if ni and eq else None,
+        )
+
+    # Net Debt / EBITDA
+    if kpi_id == "net_debt_ebitda":
+        ltd = _val(facts, "long_term_debt") or 0
+        std = _val(facts, "short_term_debt") or 0
+        cash = _val(facts, "cash_and_equivalents") or 0
+        sti = _val(facts, "short_term_investments") or 0
+        net_debt = (ltd + std) - (cash + sti)
+        oi = _val(facts, "operating_income") or 0
+        da = _val(facts, "depreciation_amortization") or 0
+        ebitda = oi + da
+        val = net_debt / ebitda if ebitda != 0 else None
+        entry = _entry(facts, "long_term_debt") or _entry(facts, "operating_income")
+        return KPIResult(
+            kpi_id="net_debt_ebitda", label="Net Debt / EBITDA",
+            value=round(val, 2) if val is not None else None,
+            unit="x", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
+            source=_source_from_entry(entry, entity_name, cik),
+            computation=(
+                f"(debt {_fmt(ltd + std)} - cash {_fmt(cash + sti)}) / "
+                f"(OI {_fmt(oi)} + D&A {_fmt(da)})"
+            ) if ebitda != 0 else None,
         )
 
     # KPIs that require filing text extraction (not computable from XBRL)
@@ -362,15 +662,16 @@ class QuantEngine:
     TERMINAL_GROWTH = 0.025  # 2.5% long-run nominal GDP growth
 
     async def analyze(self, ticker: str, template: SectorTemplate) -> QuantOutput:
-        # Fetch all data sources in parallel
+        # Fetch all data sources in parallel (include quarterly for QoQ deltas)
         facts_result, quote_result, treasury_result = await asyncio.gather(
-            get_company_facts(ticker),
+            get_company_facts(ticker, include_quarterly=True),
             get_quote(ticker),
             get_treasury_yield(),
         )
 
         facts_data = facts_result.data
         facts = facts_data["facts"]
+        quarterly = facts_data.get("quarterly", {})
         entity_name = facts_data["entity_name"]
         cik = facts_data["cik"]
         quote = quote_result.data
@@ -384,10 +685,10 @@ class QuantEngine:
             ev_build, facts, entity_name, cik, risk_free
         )
 
-        # --- Sector KPIs ---
+        # --- Sector KPIs (with QoQ deltas from quarterly data) ---
         sector_kpis = {}
         for kpi_def in template.primary_kpis:
-            result = _compute_kpi(kpi_def.id, facts, entity_name, cik)
+            result = _compute_kpi(kpi_def.id, facts, entity_name, cik, quarterly)
             if result is not None:
                 sector_kpis[kpi_def.id] = result
 
@@ -515,14 +816,36 @@ class QuantEngine:
                 ev, fcf, wacc + delta, self.TERMINAL_GROWTH
             )
 
-        fcf_entry = _entry(facts, "operating_cash_flow")
+        # Separate citations for OCF and CapEx
+        ocf_entry = _entry(facts, "operating_cash_flow")
+        capex_entry = _entry(facts, "capex")
+        ocf_source = _source_from_entry(ocf_entry, entity_name, cik)
+        capex_source = _source_from_entry(capex_entry, entity_name, cik)
+
+        # Combined FCF source with proper computation trail
+        fcf_computation = (
+            f"FCF = OCF ({_fmt(ocf)}) - CapEx ({_fmt(capex)}) = {_fmt(fcf)}"
+        )
+        fcf_source = SourceMeta(
+            source_type=ocf_source.source_type,
+            filer=entity_name,
+            filing_date=ocf_source.filing_date,
+            accession_number=ocf_source.accession_number,
+            url=ocf_source.url,
+            description=fcf_computation,
+        )
 
         return MarketImplied(
-            implied_growth_rate=implied_g,
+            implied_fcf_growth_10yr=implied_g,
             wacc=wacc,
             wacc_build=wacc_build,
             fcf_used=fcf,
-            fcf_source=_source_from_entry(fcf_entry, entity_name, cik),
+            fcf_computation=fcf_computation,
+            ocf_used=ocf,
+            ocf_source=ocf_source,
+            capex_used=capex,
+            capex_source=capex_source,
+            fcf_source=fcf_source,
             terminal_growth=self.TERMINAL_GROWTH,
             ev_used=ev,
             sensitivity=sensitivity,
