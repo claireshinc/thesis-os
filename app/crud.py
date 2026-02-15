@@ -72,6 +72,9 @@ async def save_thesis(
         thesis_text=draft.thesis_text,
         sector_template=draft.sector,
         status="draft",
+        variant=draft.variant or None,
+        mechanism=draft.mechanism or None,
+        disconfirming=draft.disconfirming or None,
     )
     if entry_price is not None:
         thesis.entry_price = entry_price
@@ -89,6 +92,7 @@ async def save_thesis(
             thesis_id=thesis.id,
             statement=c.statement,
             kpi_id=c.kpi_id,
+            kpi_family=getattr(c, "kpi_family", "lagging"),
             current_value=c.current_value,
             qoq_delta=c.qoq_delta,
             yoy_delta=c.yoy_delta,

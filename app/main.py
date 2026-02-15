@@ -29,9 +29,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud
 from app.brief import DecisionBriefResponse, detect_sector, generate_brief
+from app.coverage import DriverCoverageResponse, compute_coverage_from_claims
+from app.data import get_company_submissions
 from app.changes import ChangeFeedResponse, detect_changes
 from app.db import get_session, init_db
 from app.export import export_brief_markdown, export_brief_pdf, export_thesis_markdown
+from app.extraction import supplement_kpis_from_filings
 from app.quant import QuantEngine
 from app.templates import SECTOR_TEMPLATES, get_template
 from app.thesis import CommandRouter, ThesisCompiler
@@ -77,6 +80,7 @@ class ClaimResponse(BaseModel):
     id: str
     statement: str
     kpi_id: str
+    kpi_family: str = "lagging"
     current_value: float | None = None
     qoq_delta: float | None = None
     yoy_delta: float | None = None
@@ -120,6 +124,10 @@ class ThesisResponse(BaseModel):
     thesis_text: str
     sector_template: str
     status: str
+    variant: str | None = None
+    mechanism: str | None = None
+    disconfirming: list[str] | None = None
+    driver_coverage: DriverCoverageResponse | None = None
     entry_price: float | None = None
     entry_date: date | None = None
     close_price: float | None = None
@@ -322,6 +330,16 @@ async def compile_thesis(
         logging.getLogger(__name__).error("Quant engine failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Quant engine failed: {exc}")
 
+    # 2b. Supplement KPIs from filing text
+    sub_result = await get_company_submissions(ticker)
+    cik = sub_result.data["cik"] if not req.sector else sub_result.data.get("cik", "")
+    try:
+        quant_output = await supplement_kpis_from_filings(
+            ticker, template, quant_output, cik,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("KPI supplement failed: %s", exc)
+
     # 3. Compile thesis (LLM call)
     try:
         compiler = ThesisCompiler()
@@ -342,7 +360,9 @@ async def compile_thesis(
 
     # 5. Reload with relationships for response
     thesis = await crud.get_thesis(session, thesis.id)
-    return ThesisResponse.model_validate(thesis)
+    resp = ThesisResponse.model_validate(thesis)
+    resp.driver_coverage = compute_coverage_from_claims(thesis.claims)
+    return resp
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -364,7 +384,9 @@ async def get_thesis_by_id(
     thesis = await crud.get_thesis(session, thesis_id)
     if thesis is None:
         raise HTTPException(status_code=404, detail=f"Thesis {thesis_id} not found")
-    return ThesisResponse.model_validate(thesis)
+    resp = ThesisResponse.model_validate(thesis)
+    resp.driver_coverage = compute_coverage_from_claims(thesis.claims)
+    return resp
 
 
 @app.get(

@@ -109,6 +109,18 @@ can cite directly from the filing.
 
 {citation_rules}
 
+HEADLINE RULE (MANDATORY):
+Every red flag headline in the "flag" field MUST contain:
+  1. The specific metric name
+  2. The actual values for the last 2 periods
+  3. The computed % change
+Example headline: "CapEx grew 43% YoY ($32.3B vs $22.6B) while revenue grew 14%"
+Example headline: "SBC/Revenue ratio rose to 12.3% from 10.1% (+220bps YoY)"
+Example headline: "Accounts receivable grew 28% ($8.2B vs $6.4B) outpacing revenue growth of 14%"
+NEVER write vague headlines like "potential risk from infrastructure investments"
+or "increasing compensation expense". If you cannot cite specific numbers from
+the filing, do NOT include the flag.
+
 SECTOR-SPECIFIC RED FLAGS TO CHECK:
 {sector_checklist}
 
@@ -130,12 +142,12 @@ For each red flag found, respond in JSON (no markdown fences):
 {{
   "red_flags": [
     {{
-      "flag": "Short description of the red flag",
+      "flag": "Specific headline with metric name, values, and % change (see HEADLINE RULE)",
       "severity": "high|medium|low",
       "section": "Exact filing section name",
       "page": null,
       "page_unverified": true,
-      "evidence": "What specifically in the filing triggered this flag (quote or paraphrase)",
+      "evidence": "What specifically in the filing triggered this flag (quote or paraphrase with exact numbers)",
       "context": "Why this matters or why it might be benign — include sector context",
       "type": "fact"
     }}
@@ -144,7 +156,7 @@ For each red flag found, respond in JSON (no markdown fences):
 }}
 
 If no red flags are found, return {{"red_flags": [], "clean_areas": [...]}}.
-Only flag things you can cite directly from the filing.
+Only flag things you can cite directly from the filing with specific numbers.
 
 Filing text:
 {filing_text}
@@ -233,6 +245,51 @@ Respond in JSON (no markdown fences):
 
 Return 1-5 relevant passages, ordered by relevance. If nothing relevant is found,
 return {{"passages": [], "query_answered": false}}.
+
+Filing text:
+{filing_text}
+""".strip()
+
+
+# ---------------------------------------------------------------------------
+# Structured KPI extraction — extract specific metrics from filing text
+# ---------------------------------------------------------------------------
+
+STRUCTURED_KPI_EXTRACTION_PROMPT = """You are a financial data extraction specialist.
+Your job is to extract SPECIFIC numeric KPIs from an SEC filing. Only extract values
+that are explicitly stated — NEVER estimate, compute, or infer values.
+
+Ticker: {ticker}
+Filing: {form_type} filed {filing_date}
+
+KPIs to extract:
+{kpi_requests}
+
+For EACH requested KPI, respond in JSON (no markdown fences):
+{{
+  "extracted_kpis": [
+    {{
+      "kpi_id": "the_requested_kpi_id",
+      "value": 115.0,
+      "unit": "%",
+      "period": "FY2025",
+      "exact_quote": "The exact sentence from the filing containing this number",
+      "section": "Section name where found",
+      "confidence": "high|medium|low",
+      "note": "Any relevant context (e.g., 'reported as dollar-based net retention')"
+    }}
+  ]
+}}
+
+Rules:
+- ONLY extract values explicitly stated in the filing. If a KPI is not disclosed,
+  omit it from the response entirely — do NOT guess or approximate.
+- "high" confidence: exact number clearly labeled in the filing.
+- "medium" confidence: number is stated but label is slightly different from requested KPI.
+- "low" confidence: number requires interpretation (e.g., computing from two stated values).
+- Include the EXACT QUOTE containing the number (under 100 words).
+- If the company uses a different name for the same metric (e.g., "dollar-based net
+  expansion rate" instead of "net revenue retention"), extract it and note the alias.
 
 Filing text:
 {filing_text}

@@ -19,11 +19,14 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.coverage import DriverCoverageResponse, compute_driver_coverage, coverage_to_response
 from app.data import (
     SIC_TO_SECTOR,
     get_company_filings,
     get_company_submissions,
+    get_segment_revenue,
 )
+from app.extraction import supplement_kpis_from_filings
 from app.flow import FlowEngine, FlowOutput
 from app.qualitative import QualitativeEngine, RedFlagReport
 from app.quant import QuantEngine, QuantOutput
@@ -76,6 +79,25 @@ class MarketImpliedResponse(BaseModel):
     terminal_growth: float
     ev_used: float
     sensitivity: dict[str, float | None]
+    # Consensus comparison
+    consensus_revenue_growth: float | None = None
+    consensus_eps: float | None = None
+    consensus_source: str = "not available"
+    company_guidance_revenue_growth: float | None = None
+    company_guidance_source: str = "not extracted"
+
+
+class TrendPointResponse(BaseModel):
+    period: str
+    value: float
+
+
+class SegmentResponse(BaseModel):
+    name: str
+    revenue: float
+    pct_of_total: float
+    yoy_growth: float | None = None
+    period: str
 
 
 class KPIResponse(BaseModel):
@@ -84,12 +106,14 @@ class KPIResponse(BaseModel):
     value: float | None = None
     unit: str
     period: str
+    kpi_family: str = "lagging"  # "leading", "lagging", "efficiency", "quality"
     prior_value: float | None = None
     yoy_delta: float | None = None
     qoq_value: float | None = None
     qoq_prior: float | None = None
     qoq_delta: float | None = None
     qoq_period: str | None = None
+    trend: list[TrendPointResponse] = Field(default_factory=list)
     source: SourceMetaResponse | None = None
     computation: str | None = None
     note: str | None = None
@@ -118,6 +142,7 @@ class InsiderTransactionResponse(BaseModel):
     is_notable: bool
     context_note: str
     source: SourceMetaResponse
+    transaction_count: int = 1
 
 
 class HolderEntryResponse(BaseModel):
@@ -182,6 +207,12 @@ class DecisionBriefResponse(BaseModel):
     sector_kpis: list[KPIResponse]
     quality_scores: list[ScoreResponse]
     excluded_scores: dict[str, str]
+
+    # Segments
+    segments: list[SegmentResponse] | None = None
+
+    # Coverage
+    driver_coverage: DriverCoverageResponse
 
     # Flow
     holder_map: HolderMapResponse
@@ -254,17 +285,29 @@ def _serialize_implied(mi) -> MarketImpliedResponse | None:
         terminal_growth=mi.terminal_growth,
         ev_used=mi.ev_used,
         sensitivity={k: _nan_safe(v) for k, v in mi.sensitivity.items()},
+        consensus_revenue_growth=mi.consensus_revenue_growth,
+        consensus_eps=mi.consensus_eps,
+        consensus_source=mi.consensus_source,
+        company_guidance_revenue_growth=mi.company_guidance_revenue_growth,
+        company_guidance_source=mi.company_guidance_source,
     )
 
 
-def _serialize_kpis(kpis: dict) -> list[KPIResponse]:
+def _serialize_kpis(kpis: dict, template: SectorTemplate) -> list[KPIResponse]:
+    # Build family lookup from template
+    family_map = {k.id: k.kpi_family for k in template.primary_kpis}
     out = []
     for kpi in kpis.values():
         out.append(KPIResponse(
             kpi_id=kpi.kpi_id, label=kpi.label, value=kpi.value, unit=kpi.unit,
-            period=kpi.period, prior_value=kpi.prior_value, yoy_delta=kpi.yoy_delta,
+            period=kpi.period, kpi_family=family_map.get(kpi.kpi_id, "lagging"),
+            prior_value=kpi.prior_value, yoy_delta=kpi.yoy_delta,
             qoq_value=kpi.qoq_value, qoq_prior=kpi.qoq_prior,
             qoq_delta=kpi.qoq_delta, qoq_period=kpi.qoq_period,
+            trend=[
+                TrendPointResponse(period=tp.period, value=tp.value)
+                for tp in kpi.trend
+            ],
             source=_src(kpi.source) if kpi.source else None,
             computation=kpi.computation, note=kpi.note,
         ))
@@ -301,6 +344,7 @@ def _serialize_holder_map(hm) -> HolderMapResponse:
                 is_10b5_1=t.is_10b5_1, is_discretionary=t.is_discretionary,
                 pct_of_holdings=t.pct_of_holdings, is_notable=t.is_notable,
                 context_note=t.context_note, source=_src(t.source),
+                transaction_count=getattr(t, "transaction_count", 1),
             )
             for t in hm.insider_activity
         ],
@@ -416,18 +460,21 @@ async def generate_brief(
         except ValueError:
             logger.warning("Qualitative engine unavailable (no API key)")
 
+    # Segment revenue runs in parallel with everything else
+    segment_task = get_segment_revenue(ticker)
+
     # Gather — all engines run concurrently
     if qual_task:
-        quant_out, flow_out, red_flag_out = await asyncio.gather(
-            quant_task, flow_task, qual_task,
+        quant_out, flow_out, red_flag_out, segment_result = await asyncio.gather(
+            quant_task, flow_task, qual_task, segment_task,
             return_exceptions=True,
         )
     else:
         results = await asyncio.gather(
-            quant_task, flow_task,
+            quant_task, flow_task, segment_task,
             return_exceptions=True,
         )
-        quant_out, flow_out = results
+        quant_out, flow_out, segment_result = results
         red_flag_out = None
 
     # Handle engine failures gracefully
@@ -442,6 +489,29 @@ async def generate_brief(
     if isinstance(red_flag_out, Exception):
         logger.warning("Qualitative engine failed for %s: %s", ticker, red_flag_out)
         red_flag_out = None
+
+    # Segment revenue (best-effort — None if unavailable)
+    segment_data = None
+    if isinstance(segment_result, Exception):
+        logger.warning("Segment revenue failed for %s: %s", ticker, segment_result)
+    elif hasattr(segment_result, "data") and segment_result.data:
+        segment_data = [
+            SegmentResponse(
+                name=s["name"], revenue=s["revenue"],
+                pct_of_total=s["pct_of_total"],
+                yoy_growth=s.get("yoy_growth"),
+                period=s["period"],
+            )
+            for s in segment_result.data
+        ]
+
+    # --- 3b. Supplement KPIs from filing text (LLM extraction) ---
+    try:
+        quant_out = await supplement_kpis_from_filings(
+            ticker, template, quant_out, cik,
+        )
+    except Exception as exc:
+        logger.warning("KPI supplement failed for %s: %s", ticker, exc)
 
     # --- 4. Assemble the brief ---
 
@@ -479,9 +549,11 @@ async def generate_brief(
             _serialize_implied(quant_out.market_implied)
             if quant_out.market_implied else None
         ),
-        sector_kpis=_serialize_kpis(quant_out.sector_kpis),
+        sector_kpis=_serialize_kpis(quant_out.sector_kpis, template),
         quality_scores=_serialize_scores(quant_out.quality_scores),
         excluded_scores=quant_out.excluded_scores,
+        segments=segment_data,
+        driver_coverage=coverage_to_response(compute_driver_coverage(quant_out.sector_kpis)),
         holder_map=_serialize_holder_map(flow_out.holder_map),
         red_flags=(
             _serialize_red_flags(red_flag_out)

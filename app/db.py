@@ -53,6 +53,10 @@ class Thesis(Base):
         String(20), nullable=False, default="draft"
     )  # draft, monitoring, killed, closed
 
+    variant: Mapped[str | None] = mapped_column(Text)
+    mechanism: Mapped[str | None] = mapped_column(Text)
+    disconfirming: Mapped[list | None] = mapped_column(JSONB)
+
     entry_price: Mapped[float | None] = mapped_column(Numeric(12, 4))
     entry_date: Mapped[date | None] = mapped_column(Date)
     close_price: Mapped[float | None] = mapped_column(Numeric(12, 4))
@@ -88,12 +92,13 @@ class Claim(Base):
     )
     statement: Mapped[str] = mapped_column(Text, nullable=False)
     kpi_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    kpi_family: Mapped[str] = mapped_column(String(20), default="lagging")
     current_value: Mapped[float | None] = mapped_column(Numeric(16, 4))
     qoq_delta: Mapped[float | None] = mapped_column(Numeric(10, 4))
     yoy_delta: Mapped[float | None] = mapped_column(Numeric(10, 4))
     status: Mapped[str] = mapped_column(
         String(20), default="supported"
-    )  # supported, mixed, challenged
+    )  # supported, partial, unverified, no_data, contradicted
     last_updated: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     thesis: Mapped[Thesis] = relationship(back_populates="claims")

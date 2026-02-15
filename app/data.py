@@ -934,6 +934,30 @@ XBRL_FIELD_MAP: dict[str, tuple[list[str], str]] = {
         "FiniteLivedIntangibleAssetsNet",
     ], "USD"),
 
+    # --- Revenue visibility (leading indicators) ---
+    "rpo": ([
+        "RevenueRemainingPerformanceObligation",
+    ], "USD"),
+    "rpo_current": ([
+        "RevenueRemainingPerformanceObligationExpectedToBeRecognizedInNextTwelveMonths",
+        "RevenueRemainingPerformanceObligationCurrent",
+    ], "USD"),
+    "deferred_revenue": ([
+        "ContractWithCustomerLiability",
+        "DeferredRevenue",
+        "ContractWithCustomerLiabilityCurrent",
+        "DeferredRevenueCurrent",
+    ], "USD"),
+    "deferred_revenue_noncurrent": ([
+        "ContractWithCustomerLiabilityNoncurrent",
+        "DeferredRevenueNoncurrent",
+    ], "USD"),
+
+    # --- Operating expense breakdown ---
+    "sales_and_marketing": ([
+        "SellingAndMarketingExpense",
+    ], "USD"),
+
     # --- Cash Flow ---
     "operating_cash_flow": ([
         "NetCashProvidedByUsedInOperatingActivities",
@@ -1085,8 +1109,331 @@ async def get_company_facts(
 
 
 # ---------------------------------------------------------------------------
+# Segment revenue decomposition from XBRL instance document
+# ---------------------------------------------------------------------------
+
+async def get_segment_revenue(ticker: str) -> DataResult:
+    """
+    Parse segment-level revenue from the latest 10-K's XBRL instance document.
+
+    Looks for us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax
+    (or Revenues) with us-gaap:StatementBusinessSegmentsAxis dimensions.
+    Returns segments for the two most recent fiscal years (for YoY comparison).
+    Returns data=None if no segment data is found.
+    """
+    key = _cache_key("segments", ticker.upper())
+    if key in _cache:
+        return _cache[key]
+
+    empty_result = DataResult(
+        data=None,
+        source=SourceMeta(source_type="xbrl_segments", filer=ticker.upper()),
+    )
+
+    try:
+        cik = await _resolve_cik(ticker)
+        cik_int = str(int(cik))
+
+        # Get latest 10-K accession
+        sub_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+        async with httpx.AsyncClient() as client:
+            sub_raw = await _get(client, sub_url)
+
+        filings = sub_raw.get("filings", {}).get("recent", {})
+        forms = filings.get("form", [])
+        accessions = filings.get("accessionNumber", [])
+        primary_docs = filings.get("primaryDocument", [])
+
+        acc = None
+        primary_doc = None
+        for i, form in enumerate(forms):
+            if form in ("10-K", "10-K/A", "20-F", "20-F/A"):
+                acc = accessions[i]
+                primary_doc = primary_docs[i]
+                break
+
+        if acc is None:
+            _cache[key] = empty_result
+            return empty_result
+
+        # Fetch the XBRL instance XML (_htm.xml)
+        acc_no_dash = acc.replace("-", "")
+        base_name = primary_doc.rsplit(".", 1)[0] if primary_doc else ""
+        xml_url = (
+            f"https://www.sec.gov/Archives/edgar/data/{cik_int}/"
+            f"{acc_no_dash}/{base_name}_htm.xml"
+        )
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                xml_url,
+                headers={"User-Agent": settings.sec_user_agent},
+                follow_redirects=True,
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                logger.info("No XBRL instance at %s (status %s)", xml_url, resp.status_code)
+                _cache[key] = empty_result
+                return empty_result
+            xml_text = resp.text
+
+        segments = _parse_segment_revenue(xml_text)
+
+        if not segments:
+            _cache[key] = empty_result
+            return empty_result
+
+        result = DataResult(
+            data=segments,
+            source=SourceMeta(
+                source_type="10-K",
+                filer=ticker.upper(),
+                url=xml_url,
+                description=f"Segment revenue from XBRL instance ({acc})",
+            ),
+        )
+        _cache[key] = result
+        return result
+
+    except Exception as exc:
+        logger.warning("Segment revenue parsing failed for %s: %s", ticker, exc)
+        _cache[key] = empty_result
+        return empty_result
+
+
+def _parse_segment_revenue(xml_text: str) -> list[dict] | None:
+    """Parse segment revenue from XBRL instance XML. Returns list of segment dicts or None."""
+    root = ET.fromstring(xml_text)
+    xbrli_ns = "http://www.xbrl.org/2003/instance"
+
+    # Build context -> (start, end, dimensions) mapping
+    contexts: dict[str, dict] = {}
+    for ctx in root.iter(f"{{{xbrli_ns}}}context"):
+        ctx_id = ctx.get("id", "")
+        period = ctx.find(f"{{{xbrli_ns}}}period")
+        if period is None:
+            continue
+        start = period.findtext(f"{{{xbrli_ns}}}startDate", "")
+        end = period.findtext(f"{{{xbrli_ns}}}endDate", "")
+        if not start or not end:
+            continue  # skip instant contexts
+
+        seg = ctx.find(f".//{{{xbrli_ns}}}segment")
+        dims: dict[str, str] = {}
+        if seg is not None:
+            for child in seg:
+                dim = child.get("dimension", "")
+                member = child.text or ""
+                dims[dim] = member
+        contexts[ctx_id] = {"start": start, "end": end, "dims": dims}
+
+    # Collect segment revenue facts
+    seg_axis = "us-gaap:StatementBusinessSegmentsAxis"
+    product_axis = "srt:ProductOrServiceAxis"
+    geo_axis = "srt:StatementGeographicalAxis"
+
+    # Look for revenue tags across any us-gaap year namespace
+    revenue_tags = (
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+    )
+
+    raw_facts: list[dict] = []
+    seen_ctx: set[str] = set()
+
+    for elem in root.iter():
+        tag_local = elem.tag.rsplit("}", 1)[-1] if "}" in elem.tag else elem.tag
+        if tag_local not in revenue_tags:
+            continue
+
+        ctx_ref = elem.get("contextRef", "")
+        ctx = contexts.get(ctx_ref)
+        if ctx is None:
+            continue
+        dims = ctx["dims"]
+
+        # Only want top-level business segments (not product or geo breakdowns)
+        if seg_axis not in dims:
+            continue
+        if product_axis in dims or geo_axis in dims:
+            continue
+
+        # Deduplicate by context ref (different revenue tags may match same context)
+        if ctx_ref in seen_ctx:
+            continue
+        seen_ctx.add(ctx_ref)
+
+        try:
+            value = int(elem.text) if elem.text else None
+        except (ValueError, TypeError):
+            try:
+                value = int(float(elem.text)) if elem.text else None
+            except (ValueError, TypeError):
+                continue
+        if value is None:
+            continue
+
+        member = dims[seg_axis]
+        # Clean member name: "goog:GoogleCloudMember" -> "Google Cloud"
+        name = member.rsplit(":", 1)[-1]
+        name = name.replace("Member", "")
+        # Insert spaces before capitals (CamelCase -> words)
+        name = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
+
+        raw_facts.append({
+            "name": name,
+            "revenue": value,
+            "end": ctx["end"],
+            "start": ctx["start"],
+        })
+
+    if not raw_facts:
+        return None
+
+    # Group by end date (fiscal year end)
+    from collections import defaultdict
+    by_period: dict[str, list[dict]] = defaultdict(list)
+    for f in raw_facts:
+        by_period[f["end"]].append(f)
+
+    # Take the two most recent periods
+    sorted_periods = sorted(by_period.keys(), reverse=True)[:2]
+    if not sorted_periods:
+        return None
+
+    latest = sorted_periods[0]
+    prior = sorted_periods[1] if len(sorted_periods) > 1 else None
+
+    # Build prior year lookup
+    prior_map: dict[str, int] = {}
+    if prior:
+        for s in by_period[prior]:
+            prior_map[s["name"]] = s["revenue"]
+
+    # Compute total for pct_of_total
+    total_rev = sum(s["revenue"] for s in by_period[latest])
+    if total_rev == 0:
+        return None
+
+    segments = []
+    for s in by_period[latest]:
+        pct = round(s["revenue"] / total_rev * 100, 1)
+        prior_rev = prior_map.get(s["name"])
+        yoy_growth = None
+        if prior_rev and prior_rev > 0:
+            yoy_growth = round(((s["revenue"] / prior_rev) - 1) * 100, 1)
+        segments.append({
+            "name": s["name"],
+            "revenue": s["revenue"],
+            "pct_of_total": pct,
+            "yoy_growth": yoy_growth,
+            "period": latest,
+        })
+
+    # Sort by revenue descending
+    segments.sort(key=lambda x: x["revenue"], reverse=True)
+    return segments
+
+
+# ---------------------------------------------------------------------------
 # Real-time quote (price, shares, market cap)
 # ---------------------------------------------------------------------------
+
+async def get_consensus_estimates(ticker: str) -> DataResult:
+    """
+    Fetch analyst consensus estimates from FMP (Financial Modeling Prep).
+
+    Returns consensus revenue and EPS for the next fiscal year.
+    Requires FMP_API_KEY in .env.
+    """
+    key = _cache_key("consensus", ticker.upper())
+    if key in _cache:
+        return _cache[key]
+
+    data: dict[str, Any] = {
+        "consensus_revenue": None,
+        "consensus_revenue_prior": None,
+        "consensus_revenue_growth": None,
+        "consensus_eps": None,
+        "analyst_count_revenue": None,
+        "analyst_count_eps": None,
+        "fiscal_year": None,
+    }
+    source_desc = f"Consensus estimates unavailable for {ticker.upper()}"
+
+    if not settings.fmp_api_key:
+        logger.info("No FMP_API_KEY — skipping consensus estimates")
+        result = DataResult(
+            data=data,
+            source=SourceMeta(
+                source_type="consensus",
+                filer=ticker.upper(),
+                description="FMP_API_KEY not configured",
+            ),
+        )
+        _cache[key] = result
+        return result
+
+    try:
+        async with httpx.AsyncClient() as client:
+            url = f"https://financialmodelingprep.com/api/v3/analyst-estimates/{ticker.upper()}"
+            resp = await client.get(
+                url,
+                params={"apikey": settings.fmp_api_key},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            estimates = resp.json()
+
+        if estimates and len(estimates) >= 2:
+            # estimates[0] = next fiscal year, estimates[1] = current/prior fiscal year
+            nxt = estimates[0]
+            cur = estimates[1]
+            consensus_rev = nxt.get("estimatedRevenueAvg")
+            prior_rev = cur.get("estimatedRevenueAvg")
+            if consensus_rev and prior_rev and prior_rev > 0:
+                data["consensus_revenue_growth"] = round(
+                    ((consensus_rev / prior_rev) - 1) * 100, 2
+                )
+            data["consensus_revenue"] = consensus_rev
+            data["consensus_revenue_prior"] = prior_rev
+            data["consensus_eps"] = nxt.get("estimatedEpsAvg")
+            data["analyst_count_revenue"] = nxt.get("numberAnalystEstimatedRevenue")
+            data["analyst_count_eps"] = nxt.get("numberAnalystsEstimatedEps")
+            data["fiscal_year"] = nxt.get("date", "")[:4]
+            source_desc = (
+                f"FMP analyst consensus for {ticker.upper()} "
+                f"({data['analyst_count_revenue'] or '?'} analysts)"
+            )
+        elif estimates and len(estimates) == 1:
+            nxt = estimates[0]
+            data["consensus_revenue"] = nxt.get("estimatedRevenueAvg")
+            data["consensus_eps"] = nxt.get("estimatedEpsAvg")
+            data["analyst_count_revenue"] = nxt.get("numberAnalystEstimatedRevenue")
+            data["analyst_count_eps"] = nxt.get("numberAnalystsEstimatedEps")
+            data["fiscal_year"] = nxt.get("date", "")[:4]
+            source_desc = (
+                f"FMP analyst consensus for {ticker.upper()} "
+                f"(growth not computed — only one estimate period available)"
+            )
+
+    except httpx.HTTPStatusError as exc:
+        logger.warning("FMP API error for %s: %s", ticker, exc)
+    except Exception as exc:
+        logger.warning("Consensus estimates failed for %s: %s", ticker, exc)
+
+    result = DataResult(
+        data=data,
+        source=SourceMeta(
+            source_type="consensus",
+            filer=ticker.upper(),
+            url=f"https://financialmodelingprep.com/api/v3/analyst-estimates/{ticker.upper()}",
+            description=source_desc,
+        ),
+    )
+    _cache[key] = result
+    return result
+
 
 async def get_quote(ticker: str) -> DataResult:
     """

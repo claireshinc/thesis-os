@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # SEC EDGAR
     sec_user_agent: str = "ThesisOS user@example.com"
 
+    # FMP (Financial Modeling Prep)
+    fmp_api_key: str = ""
+
     # OpenBB
     openbb_token: str = ""
 

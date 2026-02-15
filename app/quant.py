@@ -15,10 +15,12 @@ from typing import Any
 
 from scipy.optimize import brentq
 
+from app.config import settings
 from app.data import (
     DataResult,
     SourceMeta,
     get_company_facts,
+    get_consensus_estimates,
     get_quote,
     get_treasury_yield,
 )
@@ -64,6 +66,18 @@ class MarketImplied:
     terminal_growth: float
     ev_used: float
     sensitivity: dict[str, float]  # {"wacc +1%": growth, "wacc -1%": growth}
+    # Consensus comparison (from FMP analyst estimates)
+    consensus_revenue_growth: float | None = None  # NTM revenue growth %
+    consensus_eps: float | None = None  # NTM consensus EPS
+    consensus_source: str = "not available"
+    company_guidance_revenue_growth: float | None = None
+    company_guidance_source: str = "not extracted"
+
+
+@dataclass
+class TrendPoint:
+    period: str   # "Q1 FY2025"
+    value: float
 
 
 @dataclass
@@ -79,6 +93,7 @@ class KPIResult:
     qoq_prior: float | None = None  # quarter before that
     qoq_delta: float | None = None
     qoq_period: str | None = None  # "Q3 FY2025"
+    trend: list[TrendPoint] = field(default_factory=list)  # last 4-6 quarters, chronological
     source: SourceMeta | None = None
     computation: str | None = None
     note: str | None = None  # e.g. "requires filing text extraction"
@@ -215,6 +230,7 @@ _CUMULATIVE_FIELDS = frozenset({
     "net_income", "research_and_development", "sga", "sbc",
     "interest_expense", "income_tax", "depreciation_amortization",
     "operating_cash_flow", "capex", "dividends_paid", "share_repurchases",
+    "sales_and_marketing",
 })
 
 
@@ -320,6 +336,82 @@ def _qoq_margin(quarterly: dict, numerator_field: str, denominator_field: str) -
 
 
 # ---------------------------------------------------------------------------
+# Trend builders — produce chronological series for the last N quarters
+# ---------------------------------------------------------------------------
+
+MAX_TREND_QUARTERS = 6
+
+
+def _q_period_label(entry: dict) -> str:
+    return f"{entry.get('fiscal_period', '?')} FY{entry.get('fiscal_year', '?')}"
+
+
+def _trend_ratio(
+    quarterly: dict, num_field: str, den_field: str, pct: bool = True,
+) -> list[TrendPoint]:
+    """Build a trend of ratio values (num/den) over the last N quarters."""
+    n_entries = quarterly.get(num_field, [])
+    d_entries = quarterly.get(den_field, [])
+    if not n_entries or not d_entries:
+        return []
+
+    count = min(len(n_entries), len(d_entries), MAX_TREND_QUARTERS)
+    points: list[TrendPoint] = []
+    for i in range(count - 1, -1, -1):  # oldest first
+        n_val = _standalone_q(quarterly, num_field, i)
+        d_val = _standalone_q(quarterly, den_field, i)
+        ratio = _safe_div(n_val, d_val)
+        if ratio is None:
+            continue
+        if pct:
+            ratio *= 100
+        entry = _qentry(quarterly, num_field, i) or _qentry(quarterly, den_field, i)
+        if entry:
+            points.append(TrendPoint(period=_q_period_label(entry), value=round(ratio, 2)))
+    return points
+
+
+def _trend_yoy_growth(quarterly: dict, field_name: str) -> list[TrendPoint]:
+    """Build a trend of YoY growth rates per quarter."""
+    entries = quarterly.get(field_name, [])
+    if not entries:
+        return []
+
+    count = min(len(entries), MAX_TREND_QUARTERS)
+    points: list[TrendPoint] = []
+    for i in range(count - 1, -1, -1):  # oldest first
+        cur = _standalone_q(quarterly, field_name, i)
+        yago = _find_yago_q(quarterly, field_name, i)
+        if cur is None or yago is None or yago == 0:
+            continue
+        growth = ((cur / yago) - 1) * 100
+        entry = _qentry(quarterly, field_name, i)
+        if entry:
+            points.append(TrendPoint(period=_q_period_label(entry), value=round(growth, 2)))
+    return points
+
+
+def _trend_pt_yoy_growth(quarterly: dict, field_name: str) -> list[TrendPoint]:
+    """Build YoY growth trend for point-in-time balance sheet fields (no standalone conversion)."""
+    entries = quarterly.get(field_name, [])
+    if not entries:
+        return []
+
+    count = min(len(entries), MAX_TREND_QUARTERS)
+    points: list[TrendPoint] = []
+    for i in range(count - 1, -1, -1):
+        cur = _qval(quarterly, field_name, i)
+        yago = _find_yago_q(quarterly, field_name, i)
+        if cur is None or yago is None or yago == 0:
+            continue
+        growth = ((cur / yago) - 1) * 100
+        entry = _qentry(quarterly, field_name, i)
+        if entry:
+            points.append(TrendPoint(period=_q_period_label(entry), value=round(growth, 2)))
+    return points
+
+
+# ---------------------------------------------------------------------------
 # KPI computation dispatch
 # ---------------------------------------------------------------------------
 
@@ -358,6 +450,7 @@ def _compute_kpi(
             qoq_prior=round(qprior, 2) if qprior is not None else None,
             qoq_delta=round(qcur - qprior, 2) if qcur is not None and qprior is not None else None,
             qoq_period=qperiod,
+            trend=_trend_ratio(q, "gross_profit", "revenue"),
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"gross_profit ({_fmt(gp or 0)}) / revenue ({_fmt(rev or 0)})",
         )
@@ -391,6 +484,7 @@ def _compute_kpi(
             qoq_prior=round(qgrowth_prior, 2) if qgrowth_prior is not None else None,
             qoq_delta=round(qgrowth - qgrowth_prior, 2) if qgrowth is not None and qgrowth_prior is not None else None,
             qoq_period=qperiod,
+            trend=_trend_yoy_growth(q, "revenue"),
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"({_fmt(rev_0 or 0)} / {_fmt(rev_1 or 0)} - 1)" if rev_0 and rev_1 else None,
         )
@@ -411,6 +505,7 @@ def _compute_kpi(
             qoq_prior=round(qprior, 2) if qprior is not None else None,
             qoq_delta=round(qcur - qprior, 2) if qcur is not None and qprior is not None else None,
             qoq_period=qperiod,
+            trend=_trend_ratio(q, "sbc", "revenue"),
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"sbc ({_fmt(sbc or 0)}) / revenue ({_fmt(rev or 0)})" if sbc and rev else None,
         )
@@ -442,6 +537,22 @@ def _compute_kpi(
             qprior *= 100
         qe = _qentry(q, "operating_cash_flow", 0)
         qperiod = f"{qe.get('fiscal_period', '?')} FY{qe.get('fiscal_year', '?')}" if qe else None
+        # FCF margin trend — needs custom since it's (ocf-capex)/rev
+        fcf_trend: list[TrendPoint] = []
+        ocf_entries = q.get("operating_cash_flow", [])
+        cap_entries = q.get("capex", [])
+        rev_entries = q.get("revenue", [])
+        trend_count = min(len(ocf_entries), len(cap_entries), len(rev_entries), MAX_TREND_QUARTERS)
+        for ti in range(trend_count - 1, -1, -1):
+            t_ocf = _standalone_q(q, "operating_cash_flow", ti)
+            t_cap = _standalone_q(q, "capex", ti)
+            t_rev = _standalone_q(q, "revenue", ti)
+            if t_ocf is not None and t_cap is not None and t_rev and t_rev != 0:
+                t_fcf_m = ((t_ocf - t_cap) / t_rev) * 100
+                te = _qentry(q, "operating_cash_flow", ti)
+                if te:
+                    fcf_trend.append(TrendPoint(period=_q_period_label(te), value=round(t_fcf_m, 2)))
+
         return KPIResult(
             kpi_id="fcf_margin", label="FCF Margin", value=round(val, 2) if val else None,
             unit="%", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
@@ -449,6 +560,7 @@ def _compute_kpi(
             qoq_prior=round(qprior, 2) if qprior is not None else None,
             qoq_delta=round(qcur - qprior, 2) if qcur is not None and qprior is not None else None,
             qoq_period=qperiod,
+            trend=fcf_trend,
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"(OCF {_fmt(ocf or 0)} - capex {_fmt(capex or 0)}) / revenue {_fmt(rev or 0)}" if all([ocf, capex, rev]) else None,
         )
@@ -490,6 +602,20 @@ def _compute_kpi(
         qval_prior = (qinv1 / (qcogs1 * 4 / 365)) if qinv1 and qcogs1 and qcogs1 != 0 else None
         qe = _qentry(q, "inventory", 0)
         qperiod = f"{qe.get('fiscal_period', '?')} FY{qe.get('fiscal_year', '?')}" if qe else None
+        # Inventory days trend — custom (inventory / annualized quarterly COGS)
+        inv_trend: list[TrendPoint] = []
+        inv_entries = q.get("inventory", [])
+        cogs_entries = q.get("cost_of_revenue", [])
+        inv_tc = min(len(inv_entries), len(cogs_entries), MAX_TREND_QUARTERS)
+        for ti in range(inv_tc - 1, -1, -1):
+            t_inv = _qval(q, "inventory", ti)
+            t_cogs = _standalone_q(q, "cost_of_revenue", ti)
+            if t_inv and t_cogs and t_cogs != 0:
+                t_days = t_inv / (t_cogs * 4 / 365)
+                te = _qentry(q, "inventory", ti)
+                if te:
+                    inv_trend.append(TrendPoint(period=_q_period_label(te), value=round(t_days, 1)))
+
         return KPIResult(
             kpi_id="inventory_days", label="Inventory Days", value=round(val, 1) if val else None,
             unit="days", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
@@ -499,6 +625,7 @@ def _compute_kpi(
             qoq_prior=round(qval_prior, 1) if qval_prior is not None else None,
             qoq_delta=round(qval - qval_prior, 1) if qval is not None and qval_prior is not None else None,
             qoq_period=qperiod,
+            trend=inv_trend,
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"inventory ({_fmt(inv or 0)}) / (COGS ({_fmt(cogs or 0)}) / 365)" if inv and cogs else None,
         )
@@ -519,6 +646,7 @@ def _compute_kpi(
             qoq_prior=round(qprior, 2) if qprior is not None else None,
             qoq_delta=round(qcur - qprior, 2) if qcur is not None and qprior is not None else None,
             qoq_period=qperiod,
+            trend=_trend_ratio(q, "capex", "revenue"),
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"capex ({_fmt(capex or 0)}) / revenue ({_fmt(rev or 0)})" if capex and rev else None,
         )
@@ -539,6 +667,7 @@ def _compute_kpi(
             qoq_prior=round(qprior, 2) if qprior is not None else None,
             qoq_delta=round(qcur - qprior, 2) if qcur is not None and qprior is not None else None,
             qoq_period=qperiod,
+            trend=_trend_ratio(q, "research_and_development", "revenue"),
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"R&D ({_fmt(rnd or 0)}) / revenue ({_fmt(rev or 0)})" if rnd and rev else None,
         )
@@ -566,6 +695,7 @@ def _compute_kpi(
             qoq_prior=round(qprior, 2) if qprior is not None else None,
             qoq_delta=round(qcur - qprior, 2) if qcur is not None and qprior is not None else None,
             qoq_period=qperiod,
+            trend=_trend_ratio(q, "operating_income", "revenue"),
             source=_source_from_entry(entry, entity_name, cik),
             computation=f"operating_income ({_fmt(oi or 0)}) / revenue ({_fmt(rev or 0)})" if oi and rev else None,
         )
@@ -635,8 +765,92 @@ def _compute_kpi(
             ) if ebitda != 0 else None,
         )
 
+    # RPO growth YoY (point-in-time balance sheet item — no standalone conversion)
+    if kpi_id == "rpo_growth":
+        rpo_0 = _val(facts, "rpo", 0)
+        rpo_1 = _val(facts, "rpo", 1)
+        val = ((rpo_0 / rpo_1) - 1) * 100 if rpo_0 and rpo_1 and rpo_1 != 0 else None
+        entry = _entry(facts, "rpo")
+        # QoQ: quarterly RPO is point-in-time, compare latest two quarters
+        qrpo0 = _qval(q, "rpo", 0)
+        qrpo1 = _qval(q, "rpo", 1)
+        qrpo_yago = _find_yago_q(q, "rpo", 0) if q.get("rpo") else None
+        qgrowth = ((qrpo0 / qrpo_yago) - 1) * 100 if qrpo0 and qrpo_yago and qrpo_yago != 0 else None
+        qgrowth_prior = None
+        if qrpo1:
+            qrpo1_yago = _find_yago_q(q, "rpo", 1) if q.get("rpo") else None
+            qgrowth_prior = ((qrpo1 / qrpo1_yago) - 1) * 100 if qrpo1_yago and qrpo1_yago != 0 else None
+        qe = _qentry(q, "rpo", 0)
+        qperiod = f"{qe.get('fiscal_period', '?')} FY{qe.get('fiscal_year', '?')}" if qe else None
+        return KPIResult(
+            kpi_id="rpo_growth", label="RPO Growth YoY",
+            value=round(val, 2) if val is not None else None,
+            unit="%", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
+            qoq_value=round(qgrowth, 2) if qgrowth is not None else None,
+            qoq_prior=round(qgrowth_prior, 2) if qgrowth_prior is not None else None,
+            qoq_delta=round(qgrowth - qgrowth_prior, 2) if qgrowth is not None and qgrowth_prior is not None else None,
+            qoq_period=qperiod,
+            trend=_trend_pt_yoy_growth(q, "rpo"),
+            source=_source_from_entry(entry, entity_name, cik),
+            computation=f"({_fmt(rpo_0 or 0)} / {_fmt(rpo_1 or 0)} - 1)" if rpo_0 and rpo_1 else None,
+            note="RPO not reported" if rpo_0 is None else None,
+        )
+
+    # Deferred revenue growth YoY (point-in-time balance sheet item)
+    if kpi_id == "deferred_rev_growth":
+        dr_0 = _val(facts, "deferred_revenue", 0)
+        dr_1 = _val(facts, "deferred_revenue", 1)
+        val = ((dr_0 / dr_1) - 1) * 100 if dr_0 and dr_1 and dr_1 != 0 else None
+        entry = _entry(facts, "deferred_revenue")
+        # QoQ
+        qdr0 = _qval(q, "deferred_revenue", 0)
+        qdr1 = _qval(q, "deferred_revenue", 1)
+        qdr_yago = _find_yago_q(q, "deferred_revenue", 0) if q.get("deferred_revenue") else None
+        qgrowth = ((qdr0 / qdr_yago) - 1) * 100 if qdr0 and qdr_yago and qdr_yago != 0 else None
+        qgrowth_prior = None
+        if qdr1:
+            qdr1_yago = _find_yago_q(q, "deferred_revenue", 1) if q.get("deferred_revenue") else None
+            qgrowth_prior = ((qdr1 / qdr1_yago) - 1) * 100 if qdr1_yago and qdr1_yago != 0 else None
+        qe = _qentry(q, "deferred_revenue", 0)
+        qperiod = f"{qe.get('fiscal_period', '?')} FY{qe.get('fiscal_year', '?')}" if qe else None
+        return KPIResult(
+            kpi_id="deferred_rev_growth", label="Deferred Revenue Growth YoY",
+            value=round(val, 2) if val is not None else None,
+            unit="%", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
+            qoq_value=round(qgrowth, 2) if qgrowth is not None else None,
+            qoq_prior=round(qgrowth_prior, 2) if qgrowth_prior is not None else None,
+            qoq_delta=round(qgrowth - qgrowth_prior, 2) if qgrowth is not None and qgrowth_prior is not None else None,
+            qoq_period=qperiod,
+            trend=_trend_pt_yoy_growth(q, "deferred_revenue"),
+            source=_source_from_entry(entry, entity_name, cik),
+            computation=f"({_fmt(dr_0 or 0)} / {_fmt(dr_1 or 0)} - 1)" if dr_0 and dr_1 else None,
+        )
+
+    # S&M / Revenue
+    if kpi_id == "sm_revenue":
+        sm = _val(facts, "sales_and_marketing")
+        rev = _val(facts, "revenue")
+        val = _safe_div(sm, rev)
+        if val is not None:
+            val *= 100
+        entry = _entry(facts, "sales_and_marketing") or _entry(facts, "revenue")
+        qcur, qprior, qperiod = _qoq_margin(q, "sales_and_marketing", "revenue")
+        return KPIResult(
+            kpi_id="sm_revenue", label="S&M / Revenue",
+            value=round(val, 2) if val is not None else None,
+            unit="%", period=f"FY{entry.get('fiscal_year', '?')}" if entry else "?",
+            qoq_value=round(qcur, 2) if qcur is not None else None,
+            qoq_prior=round(qprior, 2) if qprior is not None else None,
+            qoq_delta=round(qcur - qprior, 2) if qcur is not None and qprior is not None else None,
+            qoq_period=qperiod,
+            trend=_trend_ratio(q, "sales_and_marketing", "revenue"),
+            source=_source_from_entry(entry, entity_name, cik),
+            computation=f"S&M ({_fmt(sm or 0)}) / revenue ({_fmt(rev or 0)})" if sm and rev else None,
+            note="S&M expense not reported separately" if sm is None else None,
+        )
+
     # KPIs that require filing text extraction (not computable from XBRL)
-    if kpi_id in ("nrr", "cac_payback", "backlog", "book_to_bill"):
+    if kpi_id in ("nrr", "cac_payback", "backlog", "book_to_bill", "subscription_mix"):
         return KPIResult(
             kpi_id=kpi_id, label=kpi_id, value=None, unit="",
             period="?", note="Requires filing text extraction — not available in XBRL",
@@ -663,10 +877,11 @@ class QuantEngine:
 
     async def analyze(self, ticker: str, template: SectorTemplate) -> QuantOutput:
         # Fetch all data sources in parallel (include quarterly for QoQ deltas)
-        facts_result, quote_result, treasury_result = await asyncio.gather(
+        facts_result, quote_result, treasury_result, consensus_result = await asyncio.gather(
             get_company_facts(ticker, include_quarterly=True),
             get_quote(ticker),
             get_treasury_yield(),
+            get_consensus_estimates(ticker),
         )
 
         facts_data = facts_result.data
@@ -682,7 +897,8 @@ class QuantEngine:
 
         # --- Reverse DCF ---
         market_implied = self._reverse_dcf(
-            ev_build, facts, entity_name, cik, risk_free
+            ev_build, facts, entity_name, cik, risk_free,
+            consensus_data=consensus_result.data,
         )
 
         # --- Sector KPIs (with QoQ deltas from quarterly data) ---
@@ -788,6 +1004,7 @@ class QuantEngine:
         entity_name: str,
         cik: str,
         risk_free: float,
+        consensus_data: dict | None = None,
     ) -> MarketImplied | None:
         ocf = _val(facts, "operating_cash_flow")
         capex = _val(facts, "capex")
@@ -835,6 +1052,21 @@ class QuantEngine:
             description=fcf_computation,
         )
 
+        # Consensus comparison fields
+        cons = consensus_data or {}
+        consensus_rev_growth = cons.get("consensus_revenue_growth")
+        consensus_eps = cons.get("consensus_eps")
+        analyst_count = cons.get("analyst_count_revenue")
+        fiscal_year = cons.get("fiscal_year")
+        if consensus_rev_growth is not None:
+            consensus_source = (
+                f"FMP consensus ({analyst_count or '?'} analysts, FY{fiscal_year or '?'})"
+            )
+        elif settings.fmp_api_key:
+            consensus_source = "not available"
+        else:
+            consensus_source = "FMP_API_KEY not configured"
+
         return MarketImplied(
             implied_fcf_growth_10yr=implied_g,
             wacc=wacc,
@@ -849,6 +1081,9 @@ class QuantEngine:
             terminal_growth=self.TERMINAL_GROWTH,
             ev_used=ev,
             sensitivity=sensitivity,
+            consensus_revenue_growth=consensus_rev_growth,
+            consensus_eps=consensus_eps,
+            consensus_source=consensus_source,
         )
 
     # -------------------------------------------------------------------

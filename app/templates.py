@@ -17,6 +17,8 @@ class KPIDefinition:
     label: str
     unit: str  # "%", "$", "x", "days", "months"
     description: str  # includes source guidance
+    kpi_family: str = "lagging"  # "leading" | "lagging" | "efficiency" | "quality"
+    extraction_hint: str | None = None  # triggers LLM extraction when XBRL returns None
     alert_above: float | None = None
     alert_below: float | None = None
     alert_direction: str | None = None  # "declining_yoy", "declining_qoq", "context_dependent"
@@ -60,6 +62,25 @@ SAAS = SectorTemplate(
     sector="saas",
     display_name="SaaS / Cloud Software",
     primary_kpis=[
+        # ── Leading indicators (3) ──
+        KPIDefinition(
+            "rpo_growth",
+            "RPO Growth YoY",
+            "%",
+            "Remaining performance obligations year-over-year growth. "
+            "Source: XBRL RevenueRemainingPerformanceObligation from 10-K/10-Q.",
+            kpi_family="leading",
+            alert_direction="declining_yoy",
+        ),
+        KPIDefinition(
+            "deferred_rev_growth",
+            "Deferred Revenue Growth YoY",
+            "%",
+            "Contract liabilities (deferred revenue) year-over-year growth. "
+            "Source: XBRL ContractWithCustomerLiability from balance sheet.",
+            kpi_family="leading",
+            alert_direction="declining_yoy",
+        ),
         KPIDefinition(
             "nrr",
             "Net Revenue Retention",
@@ -67,39 +88,79 @@ SAAS = SectorTemplate(
             "Annual recurring revenue from existing customers YoY. "
             "Source: typically in 10-K revenue discussion or S-1. "
             "Not in XBRL — requires filing text extraction.",
+            kpi_family="leading",
+            extraction_hint=(
+                "Find net revenue retention rate, net dollar retention, "
+                "or dollar-based net expansion rate. Usually in the revenue "
+                "discussion section or key business metrics."
+            ),
             alert_below=105,
         ),
+        # ── Lagging indicators (2) ──
         KPIDefinition(
-            "cac_payback",
-            "CAC Payback Period",
-            "months",
-            "S&M spend / (net new ARR x gross margin). "
-            "Compute from: 10-K SGA breakdown + ARR disclosure.",
-            alert_above=24,
-        ),
-        KPIDefinition(
-            "rule_of_40",
-            "Rule of 40",
+            "revenue_growth",
+            "Revenue Growth YoY",
             "%",
-            "Revenue growth % + FCF margin %. "
-            "Source: computed from 10-K revenue + cash flow statement.",
-            alert_below=30,
+            "Total revenue year-over-year growth. Source: 10-K income statement.",
+            kpi_family="lagging",
         ),
+        KPIDefinition(
+            "subscription_mix",
+            "Subscription Revenue %",
+            "%",
+            "Subscription/recurring revenue as % of total revenue. "
+            "Source: revenue disaggregation note in 10-K. "
+            "Not in XBRL — requires filing text extraction.",
+            kpi_family="lagging",
+            extraction_hint=(
+                "Find subscription revenue, recurring revenue, or SaaS revenue "
+                "as a percentage of total revenue. Usually in the revenue "
+                "disaggregation note or revenue discussion."
+            ),
+        ),
+        # ── Efficiency indicators (4) ──
         KPIDefinition(
             "gross_margin",
             "Gross Margin",
             "%",
             "Source: 10-K income statement. "
             "Adjust: exclude SBC from COGS if material.",
+            kpi_family="efficiency",
             alert_below=70,
         ),
         KPIDefinition(
-            "sbc_revenue",
-            "SBC / Revenue",
+            "operating_margin",
+            "Operating Margin",
             "%",
-            "Stock-based compensation as % of revenue. "
-            "Source: 10-K cash flow statement or compensation note.",
-            alert_above=25,
+            "Operating income / revenue. Source: 10-K income statement.",
+            kpi_family="efficiency",
+        ),
+        KPIDefinition(
+            "r_and_d_intensity",
+            "R&D / Revenue",
+            "%",
+            "Innovation spend. Source: 10-K income statement.",
+            kpi_family="efficiency",
+            alert_direction="context_dependent",
+        ),
+        KPIDefinition(
+            "sm_revenue",
+            "S&M / Revenue",
+            "%",
+            "Sales & marketing expense as % of revenue. "
+            "Source: 10-K income statement (SellingAndMarketingExpense).",
+            kpi_family="efficiency",
+            alert_direction="context_dependent",
+        ),
+        # ── Quality indicators (3) ──
+        KPIDefinition(
+            "rule_of_40",
+            "Rule of 40",
+            "%",
+            "Revenue growth % + FCF margin %. "
+            "Source: computed from 10-K revenue + cash flow statement.",
+            kpi_family="quality",
+            alert_below=30,
         ),
         KPIDefinition(
             "fcf_margin",
@@ -107,12 +168,16 @@ SAAS = SectorTemplate(
             "%",
             "Free cash flow / revenue. "
             "Source: 10-K cash flow (operating CF - capex) / revenue.",
+            kpi_family="quality",
         ),
         KPIDefinition(
-            "revenue_growth",
-            "Revenue Growth YoY",
+            "sbc_revenue",
+            "SBC / Revenue",
             "%",
-            "Total revenue year-over-year growth. Source: 10-K income statement.",
+            "Stock-based compensation as % of revenue. "
+            "Source: 10-K cash flow statement or compensation note.",
+            kpi_family="quality",
+            alert_above=25,
         ),
     ],
     accounting_adjustments=[
@@ -191,14 +256,8 @@ SEMIS = SectorTemplate(
             "$",
             "Unfilled orders. Source: 10-K order/backlog discussion "
             "or earnings release. Not in XBRL — requires filing text extraction.",
+            kpi_family="leading",
             alert_direction="declining_qoq",
-        ),
-        KPIDefinition(
-            "gross_margin",
-            "Gross Margin",
-            "%",
-            "Source: 10-K income statement. "
-            "Critical to decompose: mix vs ASP vs utilization.",
         ),
         KPIDefinition(
             "book_to_bill",
@@ -207,7 +266,23 @@ SEMIS = SectorTemplate(
             "New orders / revenue. >1.0 = expanding. "
             "Source: earnings release or 10-Q. "
             "Not in XBRL — requires filing text extraction.",
+            kpi_family="leading",
             alert_below=0.9,
+        ),
+        KPIDefinition(
+            "revenue_growth",
+            "Revenue Growth YoY",
+            "%",
+            "Total revenue year-over-year growth. Source: 10-K income statement.",
+            kpi_family="lagging",
+        ),
+        KPIDefinition(
+            "gross_margin",
+            "Gross Margin",
+            "%",
+            "Source: 10-K income statement. "
+            "Critical to decompose: mix vs ASP vs utilization.",
+            kpi_family="efficiency",
         ),
         KPIDefinition(
             "inventory_days",
@@ -215,6 +290,7 @@ SEMIS = SectorTemplate(
             "days",
             "Inventory / (COGS/365). Rising inventory days = "
             "demand softening or channel stuffing. Source: 10-K.",
+            kpi_family="efficiency",
             alert_direction="context_dependent",
         ),
         KPIDefinition(
@@ -223,19 +299,15 @@ SEMIS = SectorTemplate(
             "%",
             "Capital intensity. Source: 10-K cash flow statement. "
             "Varies by fabless vs IDM.",
+            kpi_family="efficiency",
         ),
         KPIDefinition(
             "r_and_d_intensity",
             "R&D / Revenue",
             "%",
             "Innovation spend. Source: 10-K income statement.",
+            kpi_family="efficiency",
             alert_direction="context_dependent",
-        ),
-        KPIDefinition(
-            "revenue_growth",
-            "Revenue Growth YoY",
-            "%",
-            "Total revenue year-over-year growth. Source: 10-K income statement.",
         ),
     ],
     accounting_adjustments=[
@@ -308,18 +380,21 @@ GENERAL = SectorTemplate(
             "Revenue Growth YoY",
             "%",
             "Total revenue year-over-year growth. Source: 10-K income statement.",
+            kpi_family="lagging",
         ),
         KPIDefinition(
             "gross_margin",
             "Gross Margin",
             "%",
             "Gross profit / revenue. Source: 10-K income statement.",
+            kpi_family="efficiency",
         ),
         KPIDefinition(
             "operating_margin",
             "Operating Margin",
             "%",
             "Operating income / revenue. Source: 10-K income statement.",
+            kpi_family="efficiency",
         ),
         KPIDefinition(
             "fcf_yield",
@@ -327,12 +402,14 @@ GENERAL = SectorTemplate(
             "%",
             "Free cash flow / total assets (proxy — true yield needs market cap). "
             "Source: 10-K cash flow statement + balance sheet.",
+            kpi_family="quality",
         ),
         KPIDefinition(
             "roe",
             "Return on Equity",
             "%",
             "Net income / total equity. Source: 10-K income statement + balance sheet.",
+            kpi_family="quality",
         ),
         KPIDefinition(
             "net_debt_ebitda",
@@ -340,6 +417,7 @@ GENERAL = SectorTemplate(
             "x",
             "(Total debt - cash) / (operating income + D&A). "
             "Source: 10-K balance sheet + income statement.",
+            kpi_family="quality",
             alert_above=4.0,
         ),
     ],

@@ -7,3 +7,4 @@ dist/
 build/
 .mypy_cache/
 .pytest_cache/
+crm_brief.json

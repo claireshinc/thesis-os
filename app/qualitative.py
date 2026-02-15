@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +30,7 @@ from app.prompts import (
     FILING_QUERY_PROMPT,
     RED_FLAG_PROMPT,
     SECTOR_RED_FLAG_CHECKLISTS,
+    STRUCTURED_KPI_EXTRACTION_PROMPT,
 )
 from app.templates import SectorTemplate
 
@@ -36,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-5-20250929"
 MAX_FILING_CHARS = 80_000  # Truncate filing text sent to the LLM
+MAX_EXTRACTION_CHARS = 40_000  # Shorter context for targeted KPI extraction
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +98,88 @@ class FilingQueryResult:
     passages: list[FilingPassage]
     query_answered: bool
     filing_source: SourceMeta
+
+
+# ---------------------------------------------------------------------------
+# Red flag self-contradiction validator
+# ---------------------------------------------------------------------------
+
+# Patterns: "X growing faster than Y", "X outpacing Y", "X exceeding Y"
+_FASTER_PATTERNS = [
+    re.compile(r"(?P<a>[\w\s&/]+?)\s+(?:growing|grew|increasing|increased)\s+(?:faster|more quickly)\s+than\s+(?P<b>[\w\s&/]+)", re.IGNORECASE),
+    re.compile(r"(?P<a>[\w\s&/]+?)\s+(?:outpacing|outpaced|outstripping|outstripped)\s+(?P<b>[\w\s&/]+)", re.IGNORECASE),
+    re.compile(r"(?P<a>[\w\s&/]+?)\s+(?:exceeding|exceeded|exceeds)\s+(?P<b>[\w\s&/]+?)\s+growth", re.IGNORECASE),
+]
+
+# Extract percentage values from evidence text: e.g. "SBC grew 12.3% vs revenue growth of 15.1%"
+_PCT_PATTERN = re.compile(r"(-?\d+\.?\d*)\s*%")
+
+
+def _validate_red_flags(
+    flags: list[RedFlag],
+    clean_areas: list[str],
+) -> tuple[list[RedFlag], list[str]]:
+    """
+    Post-process LLM red flags to catch self-contradictions.
+
+    If a flag's headline claims "A growing faster than B" but the evidence
+    numbers show A's growth rate < B's growth rate, drop the flag and
+    reclassify it as a clean area.
+    """
+    validated: list[RedFlag] = []
+    added_clean: list[str] = []
+
+    for flag in flags:
+        contradiction = _check_growth_contradiction(flag)
+        if contradiction:
+            logger.info(
+                "Dropping self-contradicting red flag: '%s' — %s",
+                flag.flag, contradiction,
+            )
+            added_clean.append(
+                f"{flag.flag} (dropped: evidence contradicts headline — {contradiction})"
+            )
+        else:
+            validated.append(flag)
+
+    return validated, clean_areas + added_clean
+
+
+def _check_growth_contradiction(flag: RedFlag) -> str | None:
+    """
+    Check if a flag's evidence contradicts its headline.
+
+    Returns a human-readable reason string if contradicted, None otherwise.
+    """
+    headline = flag.flag
+    evidence = flag.evidence
+
+    # Check for "A growing faster than B" patterns in headline
+    for pattern in _FASTER_PATTERNS:
+        m = pattern.search(headline)
+        if not m:
+            continue
+
+        a_name = m.group("a").strip()
+        b_name = m.group("b").strip()
+
+        # Extract percentages from evidence
+        pcts = _PCT_PATTERN.findall(evidence)
+        if len(pcts) < 2:
+            return None  # Can't verify without at least 2 numbers
+
+        # Heuristic: the first percentage in evidence relates to 'a',
+        # the second relates to 'b'. If a < b, it's a contradiction.
+        a_rate = float(pcts[0])
+        b_rate = float(pcts[1])
+
+        if a_rate < b_rate:
+            return (
+                f"{a_name.strip()} growth ({a_rate}%) is actually lower than "
+                f"{b_name.strip()} growth ({b_rate}%)"
+            )
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -268,9 +353,14 @@ class QualitativeEngine:
             for f in raw.get("red_flags", [])
         ]
 
+        # Post-process: drop flags whose evidence contradicts their headline
+        flags, clean_areas = _validate_red_flags(
+            flags, raw.get("clean_areas", []),
+        )
+
         return RedFlagReport(
             red_flags=flags,
-            clean_areas=raw.get("clean_areas", []),
+            clean_areas=clean_areas,
             filing_source=filing_source,
         )
 
@@ -382,6 +472,69 @@ class QualitativeEngine:
             "red_flags": red_flags,
             "filing": filing,
         }
+
+    # -------------------------------------------------------------------
+    # Structured KPI extraction
+    # -------------------------------------------------------------------
+
+    async def extract_structured_kpis(
+        self,
+        ticker: str,
+        kpi_requests: list[dict],
+        form_type: str,
+        accession_number: str,
+        cik: str,
+    ) -> list[dict]:
+        """
+        Extract specific KPI values from a filing using targeted LLM analysis.
+
+        Args:
+            kpi_requests: list of {"kpi_id": str, "label": str, "hint": str}
+                Only KPIs that returned None from XBRL should be passed here.
+
+        Returns:
+            list of {"kpi_id", "value", "unit", "period", "section",
+                     "confidence", "exact_quote", "note"}
+        """
+        if not kpi_requests:
+            return []
+
+        filing_result = await get_filing_text(accession_number, cik)
+        filing_text = filing_result.data[:MAX_EXTRACTION_CHARS]
+
+        if not filing_text:
+            logger.warning("Empty filing text for extraction: %s", accession_number)
+            return []
+
+        filing_date = filing_result.source.filing_date or "unknown"
+
+        # Format KPI requests for the prompt
+        kpi_lines = []
+        for req in kpi_requests:
+            kpi_lines.append(
+                f"- {req['kpi_id']} ({req['label']}): {req['hint']}"
+            )
+
+        prompt = STRUCTURED_KPI_EXTRACTION_PROMPT.format(
+            ticker=ticker,
+            form_type=form_type,
+            filing_date=filing_date,
+            kpi_requests="\n".join(kpi_lines),
+            filing_text=filing_text,
+        )
+
+        response = await self.client.messages.create(
+            model=MODEL,
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        raw = self._extract_json(response.content[0].text)
+        if raw is None:
+            logger.warning("Failed to parse KPI extraction response")
+            return []
+
+        return raw.get("extracted_kpis", [])
 
     # -------------------------------------------------------------------
     # Helpers

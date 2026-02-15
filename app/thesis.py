@@ -22,6 +22,7 @@ import anthropic
 
 from app.brief import DecisionBriefResponse, generate_brief
 from app.config import settings
+from app.coverage import DriverCoverage, compute_driver_coverage, coverage_to_dict
 from app.data import (
     SourceMeta,
     get_company_filings,
@@ -53,13 +54,14 @@ class CompiledClaim:
     id: str  # e.g. "AAPL-C1"
     statement: str
     kpi_id: str
+    kpi_family: str  # "leading", "lagging", "efficiency", "quality"
     current_value: float | None
     unit: str
     period: str
     source_guidance: str  # where to find evidence
     yoy_delta: float | None = None
     qoq_delta: float | None = None
-    status: str = "supported"  # "supported", "unverified"
+    status: str = "supported"  # "supported", "partial", "unverified", "no_data", "contradicted"
 
 
 @dataclass
@@ -95,6 +97,10 @@ class ThesisDraft:
     kill_criteria: list[CompiledKillCriterion]
     catalysts: list[CompiledCatalyst]
     generated_at: str
+    variant: str = ""  # what the market is missing
+    mechanism: str = ""  # why/how the variant plays out
+    disconfirming: list[str] = field(default_factory=list)  # top 3 reasons thesis could be wrong
+    driver_coverage: DriverCoverage = field(default_factory=DriverCoverage)
 
 
 @dataclass
@@ -114,6 +120,7 @@ class StressTestResult:
 # ═══════════════════════════════════════════════════════════════════════════
 
 THESIS_COMPILER_PROMPT = """You are a senior research analyst helping a PM structure an investment thesis.
+You MUST produce a MULTI-FACTOR thesis — not just revenue growth. A single-axis thesis is unacceptable.
 
 The PM has given you:
 - Ticker: {ticker}
@@ -122,8 +129,19 @@ The PM has given you:
 - Sector template: {sector_name}
 - Today's date: {today}
 
-Available KPIs from the quant engine (with current values):
-{kpi_summary}
+Available KPIs organized by family:
+
+LEADING INDICATORS (forward-looking demand signals):
+{leading_kpis}
+
+LAGGING INDICATORS (historical revenue/growth):
+{lagging_kpis}
+
+EFFICIENCY INDICATORS (operating leverage, unit economics):
+{efficiency_kpis}
+
+QUALITY INDICATORS (sustainability, earnings quality):
+{quality_kpis}
 
 Market-implied context (what the market is currently pricing in):
 {market_implied_summary}
@@ -131,17 +149,24 @@ Market-implied context (what the market is currently pricing in):
 Sector kill criteria templates:
 {kill_criteria_summary}
 
-Your job: Decompose this thesis into 2-4 specific, falsifiable claims.
-Each claim MUST be tied to a measurable KPI.
+Your job: Decompose this thesis into a structured, multi-factor analysis.
 
 Respond in JSON (no markdown fences):
 {{
+  "variant": "One sentence: what the market is missing or mispricing",
+  "mechanism": "One sentence: the causal chain — WHY the variant will play out",
+  "disconfirming": [
+    "Top reason this thesis could be wrong",
+    "Second reason",
+    "Third reason"
+  ],
   "claims": [
     {{
       "id": "{ticker}-C1",
       "statement": "Specific, falsifiable claim",
       "kpi_id": "the_kpi_id_from_template",
-      "source_guidance": "Where to find evidence (e.g., '10-K revenue discussion', 'earnings call transcript')"
+      "kpi_family": "leading|lagging|efficiency|quality",
+      "source_guidance": "Where to find evidence"
     }}
   ],
   "kill_criteria": [
@@ -164,17 +189,17 @@ Respond in JSON (no markdown fences):
   ]
 }}
 
-Rules:
-- Claims must be falsifiable — a future data point could prove them wrong.
-- Each claim must reference a KPI that can be tracked.
-- Kill criteria define when the thesis is dead. Be specific: metric, operator, threshold, duration.
-- Propose 1-3 catalysts that will test the thesis (earnings, product launches, regulatory events).
-- If the thesis is "long", kill criteria should flag deterioration.
-- If the thesis is "short", kill criteria should flag improvement (i.e., the short thesis breaking).
-- Do NOT invent KPIs — only use the ones listed above or standard financial metrics.
-- Consider the market-implied growth rate. If the market already prices in {implied_growth} growth,
-  your claims should articulate WHY growth will differ from what's priced. Kill criteria should
-  trigger if the thesis converges with consensus rather than diverging as expected.
+STRUCTURAL RULES (MANDATORY):
+1. Generate 3-5 claims spanning AT LEAST 2 different kpi_family categories.
+2. At least 1 claim MUST reference a leading indicator (forward-looking).
+3. The "variant" MUST explain why reality differs from the market-implied {implied_growth} FCF growth.
+4. "disconfirming" is REQUIRED — list the top 3 reasons this thesis could be wrong.
+5. "mechanism" must explain the causal chain, not just restate the thesis.
+6. Claims must be falsifiable — a future data point could prove them wrong.
+7. Kill criteria define when the thesis is dead. Be specific: metric, operator, threshold, duration.
+8. Do NOT invent KPIs — only use the ones listed above.
+9. If a KPI has value=N/A, you can still reference it in claims (it will be tracked when data becomes available).
+10. Prefer claims that COMBINE leading + lagging evidence (e.g., "RPO growth of X% suggests revenue acceleration").
 """.strip()
 
 
@@ -261,17 +286,30 @@ class ThesisCompiler:
         """Compile a thesis into structured claims + kill criteria."""
         ticker = ticker.upper()
 
-        # Build KPI summary for the prompt
-        kpi_lines = []
-        for kpi_id, kpi_result in quant_output.sector_kpis.items():
+        # Build KPI lookup by family for the template
+        kpi_family_map: dict[str, str] = {}
+        for kpi_def in template.primary_kpis:
+            kpi_family_map[kpi_def.id] = kpi_def.kpi_family
+
+        # Build KPI summary organized by family
+        def _kpi_line(kpi_id: str) -> str:
+            kpi_result = quant_output.sector_kpis.get(kpi_id)
+            if kpi_result is None:
+                return f"- {kpi_id}: N/A (not computed)"
             val_str = f"{kpi_result.value}{kpi_result.unit}" if kpi_result.value is not None else "N/A"
             yoy = f", YoY delta: {kpi_result.yoy_delta}" if kpi_result.yoy_delta is not None else ""
             qoq = f", QoQ delta: {kpi_result.qoq_delta}" if kpi_result.qoq_delta is not None else ""
             note = f" ({kpi_result.note})" if kpi_result.note else ""
-            kpi_lines.append(
-                f"- {kpi_result.label} ({kpi_id}): {val_str} [{kpi_result.period}]{yoy}{qoq}{note}"
-            )
-        kpi_summary = "\n".join(kpi_lines) if kpi_lines else "No KPIs computed yet."
+            return f"- {kpi_result.label} ({kpi_id}): {val_str} [{kpi_result.period}]{yoy}{qoq}{note}"
+
+        families: dict[str, list[str]] = {"leading": [], "lagging": [], "efficiency": [], "quality": []}
+        for kpi_def in template.primary_kpis:
+            families.setdefault(kpi_def.kpi_family, []).append(_kpi_line(kpi_def.id))
+
+        leading_kpis = "\n".join(families.get("leading", [])) or "None available"
+        lagging_kpis = "\n".join(families.get("lagging", [])) or "None available"
+        efficiency_kpis = "\n".join(families.get("efficiency", [])) or "None available"
+        quality_kpis = "\n".join(families.get("quality", [])) or "None available"
 
         # Build kill criteria summary from template defaults
         kc_lines = []
@@ -307,7 +345,10 @@ class ThesisCompiler:
             thesis_text=thesis_text,
             sector_name=template.display_name,
             today=date.today().isoformat(),
-            kpi_summary=kpi_summary,
+            leading_kpis=leading_kpis,
+            lagging_kpis=lagging_kpis,
+            efficiency_kpis=efficiency_kpis,
+            quality_kpis=quality_kpis,
             market_implied_summary=market_implied_summary,
             implied_growth=implied_growth,
             kill_criteria_summary=kill_criteria_summary,
@@ -315,7 +356,7 @@ class ThesisCompiler:
 
         response = await self.client.messages.create(
             model=MODEL,
-            max_tokens=3000,
+            max_tokens=4000,
             messages=[{"role": "user", "content": prompt}],
         )
 
@@ -329,15 +370,17 @@ class ThesisCompiler:
                 generated_at=datetime.utcnow().isoformat() + "Z",
             )
 
-        # Build claims with current KPI values
+        # Build claims with current KPI values + family
         claims = []
         for c in raw.get("claims", []):
             kpi_id = c.get("kpi_id", "")
             kpi_data = quant_output.sector_kpis.get(kpi_id)
+            family = c.get("kpi_family", kpi_family_map.get(kpi_id, "lagging"))
             claims.append(CompiledClaim(
                 id=c.get("id", ""),
                 statement=c.get("statement", ""),
                 kpi_id=kpi_id,
+                kpi_family=family,
                 current_value=kpi_data.value if kpi_data else None,
                 unit=kpi_data.unit if kpi_data else "",
                 period=kpi_data.period if kpi_data else "?",
@@ -382,10 +425,17 @@ class ThesisCompiler:
             for cat in raw.get("catalysts", [])
         ]
 
-        # Post-LLM validation pass
+        # Post-LLM validation pass (status logic + trend checks)
         claims, kill_criteria, catalysts = _validate_draft(
             claims, kill_criteria, catalysts, date.today(),
         )
+
+        # Evaluate claim statuses based on data coverage
+        for claim in claims:
+            claim.status = _evaluate_claim_status(claim, quant_output, kpi_family_map)
+
+        # Compute driver coverage
+        coverage = compute_driver_coverage(quant_output.sector_kpis, claims=claims)
 
         return ThesisDraft(
             ticker=ticker,
@@ -397,6 +447,10 @@ class ThesisCompiler:
             kill_criteria=kill_criteria,
             catalysts=catalysts,
             generated_at=datetime.utcnow().isoformat() + "Z",
+            variant=raw.get("variant", ""),
+            mechanism=raw.get("mechanism", ""),
+            disconfirming=raw.get("disconfirming", []),
+            driver_coverage=coverage,
         )
 
 
@@ -511,12 +565,27 @@ class StressTest:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+def _extract_ticker_direction(a: str, b: str) -> tuple[str, str]:
+    """
+    Given two tokens, figure out which is ticker and which is direction.
+    Accepts both "AAPL long" and "long AAPL".
+    """
+    directions = {"long", "short"}
+    a_low, b_low = a.lower(), b.lower()
+    if a_low in directions:
+        return b.upper(), a_low
+    if b_low in directions:
+        return a.upper(), b_low
+    # Neither is a direction — assume first is ticker, second is direction
+    return a.upper(), b_low
+
+
 class CommandRouter:
     """
     Dispatches user commands to the appropriate engines.
 
     Supported commands:
-        /thesis <TICKER> <long|short> — <thesis text>
+        /thesis <TICKER> <long|short> <thesis text>  (dash separator optional)
         /stress <TICKER> — <memo text or paste bullets>
         /filing <TICKER> <query>
         /evidence <TICKER> <claim_id>
@@ -583,30 +652,53 @@ class CommandRouter:
     # /thesis <TICKER> <long|short> — <thesis text>
     # -------------------------------------------------------------------
 
+    @staticmethod
+    def _parse_thesis_args(args: str) -> tuple[str, str, str]:
+        """
+        Parse thesis arguments flexibly.
+
+        Accepted formats:
+          AAPL long — thesis text          (dash separator)
+          AAPL long -- thesis text          (double dash)
+          AAPL long - thesis text           (spaced dash)
+          AAPL long thesis text goes here   (no separator)
+          long AAPL thesis text goes here   (direction first)
+          long AAPL — thesis text           (direction first + dash)
+        """
+        # Try dash separators first
+        header: str | None = None
+        thesis_text: str | None = None
+        for sep in ("—", "--", " - "):
+            if sep in args:
+                header, thesis_text = args.split(sep, 1)
+                break
+
+        if header is not None and thesis_text is not None:
+            parts = header.strip().split()
+            if len(parts) < 2:
+                raise ValueError(
+                    "Format: /thesis TICKER long <thesis text>"
+                )
+            ticker, direction = _extract_ticker_direction(parts[0], parts[1])
+            return ticker, direction, thesis_text.strip()
+
+        # No separator — split on whitespace
+        words = args.strip().split()
+        if len(words) < 3:
+            raise ValueError(
+                "Format: /thesis TICKER long <thesis text>  "
+                "(dash separator is optional)"
+            )
+
+        ticker, direction = _extract_ticker_direction(words[0], words[1])
+        thesis_text = " ".join(words[2:])
+        return ticker, direction, thesis_text
+
     async def _handle_thesis(self, args: str) -> dict:
         if not self._compiler:
             raise ValueError("ANTHROPIC_API_KEY required for /thesis")
 
-        # Parse: "AAPL long — Apple's services revenue will..."
-        if "—" in args:
-            header, thesis_text = args.split("—", 1)
-        elif "--" in args:
-            header, thesis_text = args.split("--", 1)
-        elif " - " in args:
-            # Only split on " - " (space-dash-space) to avoid splitting on hyphens in words
-            header, thesis_text = args.split(" - ", 1)
-        else:
-            raise ValueError(
-                "Format: /thesis <TICKER> <long|short> — <thesis text>"
-            )
-
-        header_parts = header.strip().split()
-        if len(header_parts) < 2:
-            raise ValueError("Format: /thesis <TICKER> <long|short> — <thesis text>")
-
-        ticker = header_parts[0].upper()
-        direction = header_parts[1].lower()
-        thesis_text = thesis_text.strip()
+        ticker, direction, thesis_text = self._parse_thesis_args(args)
 
         if direction not in ("long", "short"):
             raise ValueError(f"Direction must be 'long' or 'short', got '{direction}'")
@@ -614,9 +706,15 @@ class CommandRouter:
         # Detect sector + run quant for current KPI values
         import asyncio
         from app.brief import detect_sector
+        from app.extraction import supplement_kpis_from_filings
 
         sector_key, template, sub_meta = await detect_sector(ticker)
         quant_output = await self._quant.analyze(ticker, template)
+
+        # Supplement KPIs from filing text
+        quant_output = await supplement_kpis_from_filings(
+            ticker, template, quant_output, sub_meta["cik"],
+        )
 
         # Compile thesis
         draft = await self._compiler.compile(
@@ -779,6 +877,59 @@ class CommandRouter:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Claim status evaluation
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _evaluate_claim_status(
+    claim: CompiledClaim,
+    quant_output: QuantOutput,
+    kpi_family_map: dict[str, str],
+) -> str:
+    """
+    Evaluate claim status based on data coverage and trend consistency.
+
+    Status hierarchy:
+      - "supported": has KPI data with numeric delta + cross-family coverage
+      - "partial": KPI has value but missing deltas or cross-family coverage
+      - "unverified": KPI exists but value is None
+      - "no_data": referenced KPI not computed at all
+      - "contradicted": trend assertion conflicts with actual delta direction
+    """
+    kpi_data = quant_output.sector_kpis.get(claim.kpi_id)
+
+    # No data at all
+    if kpi_data is None:
+        return "no_data"
+
+    # KPI exists but no value
+    if kpi_data.value is None:
+        return "unverified"
+
+    # Check for trend contradictions
+    statement_lower = claim.statement.lower()
+    words = set(statement_lower.split())
+
+    if words & _TREND_UP:
+        if kpi_data.qoq_delta is not None and kpi_data.qoq_delta < 0:
+            return "contradicted"
+        if kpi_data.yoy_delta is not None and kpi_data.yoy_delta < 0:
+            return "contradicted"
+
+    if words & _TREND_DOWN:
+        if kpi_data.qoq_delta is not None and kpi_data.qoq_delta > 0:
+            return "contradicted"
+        if kpi_data.yoy_delta is not None and kpi_data.yoy_delta > 0:
+            return "contradicted"
+
+    # Has value but no deltas → partial
+    if kpi_data.yoy_delta is None and kpi_data.qoq_delta is None:
+        return "partial"
+
+    return "supported"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Kill criterion evaluation
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -842,7 +993,8 @@ def _validate_draft(
     Post-LLM validation pass:
       (a) Drop catalysts with event_date before today
       (b) Set status='no_data' for kill criteria with null current_value
-      (c) Flag claims with unsupported trend assertions as 'unverified'
+
+    Note: claim status is now handled by _evaluate_claim_status() after this pass.
     """
     # (a) Filter out past catalysts
     valid_catalysts = []
@@ -861,25 +1013,6 @@ def _validate_draft(
         if kc.current_value is None:
             kc.status = "no_data"
             kc.distance_pct = None
-
-    # (c) Check trend assertions in claims against actual deltas
-    for claim in claims:
-        statement_lower = claim.statement.lower()
-        words = set(statement_lower.split())
-
-        # Check for upward trend assertion
-        if words & _TREND_UP:
-            if claim.qoq_delta is not None and claim.qoq_delta < 0:
-                claim.status = "unverified"
-            elif claim.yoy_delta is not None and claim.yoy_delta < 0:
-                claim.status = "unverified"
-
-        # Check for downward trend assertion
-        if words & _TREND_DOWN:
-            if claim.qoq_delta is not None and claim.qoq_delta > 0:
-                claim.status = "unverified"
-            elif claim.yoy_delta is not None and claim.yoy_delta > 0:
-                claim.status = "unverified"
 
     return claims, kill_criteria, valid_catalysts
 
@@ -932,24 +1065,39 @@ def _extract_json(text: str) -> dict | None:
 
 
 def _draft_to_dict(draft: ThesisDraft) -> dict:
-    """Convert ThesisDraft to a serializable dict."""
+    """
+    Convert ThesisDraft to a serializable dict that matches the Thesis
+    response shape so the frontend ThesisCard can render it directly.
+    """
+    now = draft.generated_at
     return {
+        "id": None,
         "ticker": draft.ticker,
         "direction": draft.direction,
         "thesis_text": draft.thesis_text,
-        "sector": draft.sector,
-        "sector_display_name": draft.sector_display_name,
+        "sector_template": draft.sector,
+        "status": "draft",
+        "variant": draft.variant,
+        "mechanism": draft.mechanism,
+        "disconfirming": draft.disconfirming,
+        "driver_coverage": coverage_to_dict(draft.driver_coverage),
+        "entry_price": None,
+        "entry_date": None,
+        "close_price": None,
+        "close_date": None,
+        "close_reason": None,
+        "created_at": now,
+        "updated_at": now,
         "claims": [
             {
                 "id": c.id,
                 "statement": c.statement,
                 "kpi_id": c.kpi_id,
+                "kpi_family": c.kpi_family,
                 "current_value": c.current_value,
-                "unit": c.unit,
-                "period": c.period,
-                "yoy_delta": c.yoy_delta,
                 "qoq_delta": c.qoq_delta,
-                "source_guidance": c.source_guidance,
+                "yoy_delta": c.yoy_delta,
+                "status": c.status,
             }
             for c in draft.claims
         ],
@@ -970,14 +1118,17 @@ def _draft_to_dict(draft: ThesisDraft) -> dict:
         ],
         "catalysts": [
             {
+                "id": i,
+                "ticker": draft.ticker,
+                "event_date": cat.expected_date,
                 "event": cat.event,
-                "expected_date": cat.expected_date,
                 "claims_tested": cat.claims_tested,
                 "kill_criteria_tested": cat.kill_criteria_tested,
+                "occurred": False,
+                "outcome_notes": None,
             }
-            for cat in draft.catalysts
+            for i, cat in enumerate(draft.catalysts)
         ],
-        "generated_at": draft.generated_at,
     }
 
 

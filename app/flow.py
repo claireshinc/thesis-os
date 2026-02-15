@@ -45,6 +45,7 @@ class InsiderTransaction:
     is_notable: bool
     context_note: str
     source: SourceMeta
+    transaction_count: int = 1  # >1 when aggregated from multiple same-day txns
 
 
 @dataclass
@@ -156,8 +157,9 @@ class FlowEngine:
         insider_result = await get_insider_details(ticker, limit=15)
         raw_txns = insider_result.data
 
-        # Filter and contextualize insider transactions
+        # Filter and contextualize insider transactions, then aggregate same-day
         insider_activity = self._filter_insider_transactions(raw_txns, ticker)
+        insider_activity = self._aggregate_by_person_day(insider_activity)
 
         # Build holder map (v1: metadata only, freshness-filtered)
         holder_map_entries, holder_data_note = await self._build_holder_map(ticker)
@@ -320,6 +322,67 @@ class FlowEngine:
         # Sort by date descending
         results.sort(key=lambda t: t.transaction_date, reverse=True)
         return results
+
+    # -------------------------------------------------------------------
+    # Aggregate same-person, same-day transactions
+    # -------------------------------------------------------------------
+
+    @staticmethod
+    def _aggregate_by_person_day(
+        transactions: list[InsiderTransaction],
+    ) -> list[InsiderTransaction]:
+        """
+        Group transactions by (owner_name, transaction_date, transaction_type)
+        and merge into single entries.  Sums shares and value, keeps max
+        pct_of_holdings, preserves is_notable if any member is notable.
+        """
+        from collections import defaultdict
+
+        groups: dict[tuple[str, str, str], list[InsiderTransaction]] = defaultdict(list)
+        for t in transactions:
+            groups[(t.owner_name, t.transaction_date, t.transaction_type)].append(t)
+
+        merged: list[InsiderTransaction] = []
+        for _key, txns in groups.items():
+            if len(txns) == 1:
+                merged.append(txns[0])
+                continue
+
+            base = txns[0]
+            total_shares = sum(t.shares or 0 for t in txns) or None
+            total_value = sum(t.value or 0 for t in txns) or None
+            max_pct = max(
+                (t.pct_of_holdings for t in txns if t.pct_of_holdings is not None),
+                default=None,
+            )
+            any_notable = any(t.is_notable for t in txns)
+            # Use latest shares_owned_after (should be the same within a day)
+            latest_after = next(
+                (t.shares_owned_after for t in txns if t.shares_owned_after is not None),
+                None,
+            )
+
+            merged.append(InsiderTransaction(
+                owner_name=base.owner_name,
+                owner_title=base.owner_title,
+                transaction_date=base.transaction_date,
+                transaction_type=base.transaction_type,
+                shares=total_shares,
+                price_per_share=base.price_per_share,  # keep first (weighted avg not needed)
+                value=total_value,
+                shares_owned_after=latest_after,
+                is_10b5_1=base.is_10b5_1,
+                is_discretionary=base.is_discretionary,
+                pct_of_holdings=max_pct,
+                is_notable=any_notable,
+                context_note=base.context_note,
+                source=base.source,
+                transaction_count=len(txns),
+            ))
+
+        # Re-sort by date descending
+        merged.sort(key=lambda t: t.transaction_date, reverse=True)
+        return merged
 
     # -------------------------------------------------------------------
     # Holder map builder (v1: metadata + classification)
