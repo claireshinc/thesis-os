@@ -39,6 +39,17 @@ export interface MarketImplied {
   terminal_growth: number;
   ev_used: number;
   sensitivity: Record<string, number | null>;
+  // Consensus comparison
+  consensus_revenue_growth: number | null;
+  consensus_eps: number | null;
+  consensus_source: string;
+  company_guidance_revenue_growth: number | null;
+  company_guidance_source: string;
+}
+
+export interface TrendPoint {
+  period: string;
+  value: number;
 }
 
 export interface KPI {
@@ -47,15 +58,32 @@ export interface KPI {
   value: number | null;
   unit: string;
   period: string;
+  kpi_family: string;
   prior_value: number | null;
   yoy_delta: number | null;
   qoq_value: number | null;
   qoq_prior: number | null;
   qoq_delta: number | null;
   qoq_period: string | null;
+  trend: TrendPoint[];
   source: SourceMeta | null;
   computation: string | null;
   note: string | null;
+}
+
+export interface DimensionCoverage {
+  status: 'covered' | 'partial' | 'missing';
+  reasons: string[];
+  supporting_artifacts: string[];
+}
+
+export interface DriverCoverage {
+  revenue_drivers: DimensionCoverage;
+  retention: DimensionCoverage;
+  pricing: DimensionCoverage;
+  margin: DimensionCoverage;
+  competition: DimensionCoverage;
+  score: number;
 }
 
 export interface QualityScore {
@@ -81,6 +109,7 @@ export interface InsiderTransaction {
   is_notable: boolean;
   context_note: string;
   source: SourceMeta;
+  transaction_count: number;
 }
 
 export interface HolderEntry {
@@ -131,6 +160,14 @@ export interface ModelInputs {
   data_freshness: Record<string, string>;
 }
 
+export interface Segment {
+  name: string;
+  revenue: number;
+  pct_of_total: number;
+  yoy_growth: number | null;
+  period: string;
+}
+
 export interface DecisionBrief {
   ticker: string;
   entity_name: string;
@@ -142,6 +179,8 @@ export interface DecisionBrief {
   sector_kpis: KPI[];
   quality_scores: QualityScore[];
   excluded_scores: Record<string, string>;
+  segments: Segment[] | null;
+  driver_coverage: DriverCoverage;
   holder_map: HolderMap;
   red_flags: RedFlagReport | null;
   model_inputs: ModelInputs;
@@ -153,6 +192,7 @@ export interface Claim {
   id: string;
   statement: string;
   kpi_id: string;
+  kpi_family: string;
   current_value: number | null;
   qoq_delta: number | null;
   yoy_delta: number | null;
@@ -190,6 +230,10 @@ export interface Thesis {
   thesis_text: string;
   sector_template: string;
   status: string;
+  variant: string | null;
+  mechanism: string | null;
+  disconfirming: string[] | null;
+  driver_coverage: DriverCoverage;
   entry_price: number | null;
   entry_date: string | null;
   close_price: number | null;

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import StatusLight from '../components/StatusLight';
 import { sendCommand, listTheses, getThesis } from '../lib/api';
 import { fmtNumber, fmtDelta } from '../lib/format';
-import type { Thesis, CommandResponse } from '../lib/types';
+import type { Thesis, CommandResponse, DriverCoverage, DimensionCoverage } from '../lib/types';
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -54,15 +54,24 @@ export default function ThesisPage() {
       } else {
         // If the command compiled a thesis, pin it
         const result = res.result;
-        if (result && 'id' in result && 'claims' in result) {
+        if (result && 'claims' in result && 'ticker' in result && 'kill_criteria' in result) {
           const thesis = result as unknown as Thesis;
           setPinnedThesis(thesis);
+          const claimCount = thesis.claims?.length ?? 0;
+          const kcCount = thesis.kill_criteria?.length ?? 0;
+          const catCount = thesis.catalysts?.length ?? 0;
           setMessages((prev) => [
             ...prev,
             {
               role: 'assistant',
-              content: `Thesis compiled for ${thesis.ticker}. Pinned to the right panel.`,
-              data: result,
+              content: [
+                `Thesis compiled for ${thesis.ticker} (${thesis.direction}).`,
+                thesis.variant ? `Variant: ${thesis.variant}` : null,
+                `${claimCount} claims, ${kcCount} kill criteria, ${catCount} catalysts.`,
+                `Pinned to the right panel.`,
+              ]
+                .filter(Boolean)
+                .join('\n'),
             },
           ]);
         } else {
@@ -102,7 +111,7 @@ export default function ThesisPage() {
             <div className="text-text-dim text-sm mt-8 text-center">
               <p>Type a command to get started.</p>
               <p className="mt-2 mono text-xs">
-                /thesis AAPL long &mdash; Services revenue will grow 20%...
+                /thesis AAPL long Services revenue will grow 20%...
               </p>
             </div>
           )}
@@ -130,7 +139,7 @@ export default function ThesisPage() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               disabled={loading}
-              placeholder="/thesis AAPL long — ..."
+              placeholder="/thesis AAPL long ..."
               className="flex-1 bg-surface border border-border rounded px-3 py-2 text-sm
                          text-text placeholder:text-text-dim focus:outline-none
                          focus:border-accent mono"
@@ -217,7 +226,30 @@ function ThesisCard({ thesis }: { thesis: Thesis }) {
           {thesis.sector_template} &middot; {thesis.status}
         </p>
         <p className="text-sm mt-2">{thesis.thesis_text}</p>
+        {thesis.variant && (
+          <p className="text-xs text-accent mt-2">
+            <span className="text-text-dim">Variant:</span> {thesis.variant}
+          </p>
+        )}
+        {thesis.mechanism && (
+          <p className="text-xs text-text-dim mt-1">
+            <span className="text-text-dim">Mechanism:</span> {thesis.mechanism}
+          </p>
+        )}
+        {thesis.disconfirming && thesis.disconfirming.length > 0 && (
+          <div className="mt-2 text-xs">
+            <span className="text-text-dim">Disconfirming:</span>
+            <ul className="mt-0.5 space-y-0.5 text-text-dim list-disc list-inside">
+              {thesis.disconfirming.map((d, i) => (
+                <li key={i}>{d}</li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
+
+      {/* Driver Coverage */}
+      <DriverCoverageMeter coverage={thesis.driver_coverage} />
 
       {/* Claims */}
       {thesis.claims.length > 0 && (
@@ -232,7 +264,10 @@ function ThesisCard({ thesis }: { thesis: Thesis }) {
                 className="border border-border rounded bg-bg p-2.5 text-xs"
               >
                 <div className="flex items-center justify-between mb-1">
-                  <span className="mono text-text-dim">{c.id}</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="mono text-text-dim">{c.id}</span>
+                    <FamilyBadge family={c.kpi_family} />
+                  </div>
                   <StatusLight status={c.status} />
                 </div>
                 <p className="text-sm">{c.statement}</p>
@@ -345,4 +380,105 @@ function ThesisCard({ thesis }: { thesis: Thesis }) {
 function DeltaSpan({ v }: { v: number }) {
   const color = v > 0 ? 'text-green' : v < 0 ? 'text-red' : '';
   return <span className={color}>{fmtDelta(v)}</span>;
+}
+
+/* ─── Driver Coverage Meter ─── */
+
+const COVERAGE_DIMENSIONS: { key: keyof Omit<DriverCoverage, 'score'>; label: string }[] = [
+  { key: 'revenue_drivers', label: 'Revenue' },
+  { key: 'retention', label: 'Retention' },
+  { key: 'pricing', label: 'Pricing' },
+  { key: 'margin', label: 'Margin' },
+  { key: 'competition', label: 'Compet.' },
+];
+
+const COVERAGE_STYLE: Record<string, string> = {
+  covered: 'bg-green/20 border-green/40 text-green',
+  partial: 'bg-yellow/20 border-yellow/40 text-yellow',
+  missing: 'bg-surface-2 border-border text-text-dim',
+};
+
+function DriverCoverageMeter({ coverage }: { coverage: DriverCoverage }) {
+  const [expandedDim, setExpandedDim] = useState<string | null>(null);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-xs uppercase tracking-wide text-text-dim">
+          Driver Coverage
+        </h3>
+        <span className="mono text-xs text-text-dim">{coverage.score}/5</span>
+      </div>
+      <div className="grid grid-cols-5 gap-1.5">
+        {COVERAGE_DIMENSIONS.map(({ key, label }) => {
+          const dim = coverage[key] as DimensionCoverage;
+          return (
+            <div
+              key={key}
+              className={`text-center text-xs rounded border px-1.5 py-1.5 cursor-pointer
+                          transition-colors
+                          ${COVERAGE_STYLE[dim.status] ?? COVERAGE_STYLE.missing}`}
+              onClick={() => setExpandedDim(expandedDim === key ? null : key)}
+            >
+              {label}
+            </div>
+          );
+        })}
+      </div>
+      {expandedDim && (
+        <CoverageDetail
+          dim={coverage[expandedDim as keyof Omit<DriverCoverage, 'score'>] as DimensionCoverage}
+          label={COVERAGE_DIMENSIONS.find((d) => d.key === expandedDim)?.label ?? expandedDim}
+        />
+      )}
+    </div>
+  );
+}
+
+function CoverageDetail({ dim, label }: { dim: DimensionCoverage; label: string }) {
+  return (
+    <div className="mt-2 border border-border rounded bg-bg p-2.5 text-xs">
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className="font-medium">{label}</span>
+        <span
+          className={`uppercase text-[10px] px-1.5 py-0.5 rounded
+                      ${COVERAGE_STYLE[dim.status] ?? COVERAGE_STYLE.missing}`}
+        >
+          {dim.status}
+        </span>
+      </div>
+      {dim.reasons.length > 0 && (
+        <ul className="space-y-0.5 text-text-dim list-disc list-inside">
+          {dim.reasons.map((r, i) => (
+            <li key={i}>{r}</li>
+          ))}
+        </ul>
+      )}
+      {dim.supporting_artifacts.length > 0 && (
+        <p className="mt-1 text-text-dim">
+          Artifacts: <span className="mono">{dim.supporting_artifacts.join(', ')}</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* ─── Family Badge ─── */
+
+const FAMILY_COLORS: Record<string, string> = {
+  leading: 'bg-accent/15 text-accent',
+  lagging: 'bg-surface-2 text-text-dim',
+  efficiency: 'bg-yellow/15 text-yellow',
+  quality: 'bg-green/15 text-green',
+};
+
+function FamilyBadge({ family }: { family: string }) {
+  return (
+    <span
+      className={`text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wide
+                  ${FAMILY_COLORS[family] ?? FAMILY_COLORS.lagging}`}
+    >
+      {family}
+    </span>
+  );
 }

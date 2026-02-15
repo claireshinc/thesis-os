@@ -5,7 +5,7 @@ import CitationTooltip from '../components/CitationTooltip';
 import StatusLight from '../components/StatusLight';
 import { getBrief, exportBriefPdfUrl, exportBriefMdUrl } from '../lib/api';
 import { fmtDollars, fmtPct, fmtPctRaw, fmtDelta, fmtNumber } from '../lib/format';
-import type { DecisionBrief, KPI, QualityScore } from '../lib/types';
+import type { DecisionBrief, KPI, QualityScore, Segment } from '../lib/types';
 
 export default function BriefPage() {
   const [brief, setBrief] = useState<DecisionBrief | null>(null);
@@ -82,6 +82,9 @@ function BriefContent({ brief }: { brief: DecisionBrief }) {
       </div>
 
       <VariantPerception brief={brief} />
+      {brief.segments && brief.segments.length > 0 && (
+        <SegmentTable segments={brief.segments} />
+      )}
       <SectorKPIs kpis={brief.sector_kpis} />
       <QualityScores
         scores={brief.quality_scores}
@@ -114,18 +117,50 @@ function VariantPerception({ brief }: { brief: DecisionBrief }) {
 
         {mi ? (
           <>
-            {/* Implied FCF growth */}
-            <div className="flex items-baseline gap-4 flex-wrap">
+            {/* Three-number comparison: implied vs consensus vs guidance */}
+            <div className="grid grid-cols-3 gap-4">
               <div>
                 <span className="text-xs text-text-dim uppercase tracking-wide">
-                  Implied FCF Growth (10yr)
+                  Market-Implied FCF Growth
                 </span>
                 <p className="mono text-lg font-bold text-accent">
                   {mi.implied_fcf_growth_10yr != null
                     ? fmtPct(mi.implied_fcf_growth_10yr)
                     : 'N/A'}
                 </p>
+                <p className="text-xs text-text-dim">10yr reverse DCF</p>
               </div>
+              <div>
+                <span className="text-xs text-text-dim uppercase tracking-wide">
+                  Consensus Revenue Growth
+                </span>
+                <p className="mono text-lg font-bold">
+                  {mi.consensus_revenue_growth != null
+                    ? fmtPctRaw(mi.consensus_revenue_growth)
+                    : 'N/A'}
+                </p>
+                <p className="text-xs text-text-dim">{mi.consensus_source}</p>
+                {mi.consensus_eps != null && (
+                  <p className="text-xs text-text-dim mono mt-0.5">
+                    EPS est: ${mi.consensus_eps.toFixed(2)}
+                  </p>
+                )}
+              </div>
+              <div>
+                <span className="text-xs text-text-dim uppercase tracking-wide">
+                  Company Guidance
+                </span>
+                <p className="mono text-lg font-bold">
+                  {mi.company_guidance_revenue_growth != null
+                    ? fmtPctRaw(mi.company_guidance_revenue_growth)
+                    : 'N/A'}
+                </p>
+                <p className="text-xs text-text-dim">{mi.company_guidance_source}</p>
+              </div>
+            </div>
+
+            {/* WACC + terminal growth */}
+            <div className="flex items-baseline gap-4 flex-wrap">
               <div>
                 <span className="text-xs text-text-dim uppercase tracking-wide">
                   WACC
@@ -179,10 +214,67 @@ function VariantPerception({ brief }: { brief: DecisionBrief }) {
   );
 }
 
+/* ─── Segment Revenue ─── */
+
+function SegmentTable({ segments }: { segments: Segment[] }) {
+  return (
+    <section>
+      <SectionHeader>Revenue Segments</SectionHeader>
+      <div className="border border-border rounded bg-surface overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border text-xs text-text-dim uppercase tracking-wide">
+              <th className="text-left p-3">Segment</th>
+              <th className="text-right p-3">Revenue</th>
+              <th className="text-right p-3">% of Total</th>
+              <th className="text-right p-3">YoY Growth</th>
+            </tr>
+          </thead>
+          <tbody>
+            {segments.map((seg) => (
+              <tr
+                key={seg.name}
+                className="border-b border-border/50 hover:bg-surface-2 transition-colors"
+              >
+                <td className="p-3">{seg.name}</td>
+                <td className="p-3 text-right mono">{fmtDollars(seg.revenue)}</td>
+                <td className="p-3 text-right mono text-text-dim">
+                  {seg.pct_of_total.toFixed(1)}%
+                </td>
+                <td className="p-3 text-right mono">
+                  {seg.yoy_growth != null ? (
+                    <span className={seg.yoy_growth > 0 ? 'text-green' : seg.yoy_growth < 0 ? 'text-red' : ''}>
+                      {seg.yoy_growth > 0 ? '+' : ''}{seg.yoy_growth.toFixed(1)}%
+                    </span>
+                  ) : (
+                    <span className="text-text-dim">-</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 /* ─── Sector KPIs ─── */
 
 function SectorKPIs({ kpis }: { kpis: KPI[] }) {
   const [expanded, setExpanded] = useState<string | null>(null);
+
+  // Group KPIs by family
+  const families = ['leading', 'lagging', 'efficiency', 'quality'];
+  const grouped = families
+    .map((fam) => ({
+      family: fam,
+      kpis: kpis.filter((k) => k.kpi_family === fam),
+    }))
+    .filter((g) => g.kpis.length > 0);
+  // Any KPIs without a recognized family
+  const other = kpis.filter((k) => !families.includes(k.kpi_family));
+  if (other.length > 0) grouped.push({ family: 'other', kpis: other });
 
   return (
     <section>
@@ -199,15 +291,19 @@ function SectorKPIs({ kpis }: { kpis: KPI[] }) {
             </tr>
           </thead>
           <tbody>
-            {kpis.map((kpi) => (
-              <KPIRow
-                key={kpi.kpi_id}
-                kpi={kpi}
-                expanded={expanded === kpi.kpi_id}
-                onToggle={() =>
-                  setExpanded(expanded === kpi.kpi_id ? null : kpi.kpi_id)
-                }
-              />
+            {grouped.map((g) => (
+              <KPIFamilyGroup key={g.family} family={g.family}>
+                {g.kpis.map((kpi) => (
+                  <KPIRow
+                    key={kpi.kpi_id}
+                    kpi={kpi}
+                    expanded={expanded === kpi.kpi_id}
+                    onToggle={() =>
+                      setExpanded(expanded === kpi.kpi_id ? null : kpi.kpi_id)
+                    }
+                  />
+                ))}
+              </KPIFamilyGroup>
             ))}
           </tbody>
         </table>
@@ -225,7 +321,7 @@ function KPIRow({
   expanded: boolean;
   onToggle: () => void;
 }) {
-  const hasDetail = kpi.computation || kpi.note;
+  const hasDetail = kpi.computation || kpi.note || kpi.trend.length > 0;
 
   return (
     <>
@@ -253,6 +349,24 @@ function KPIRow({
       {expanded && hasDetail && (
         <tr className="border-b border-border/50 bg-surface-2">
           <td colSpan={5} className="p-3 text-xs text-text-dim">
+            {kpi.trend.length > 0 && (
+              <p className="mono mb-1.5">
+                <span className="text-text-dim uppercase tracking-wide text-[10px] mr-2">
+                  Trend:
+                </span>
+                {kpi.trend.map((tp, i) => (
+                  <span key={tp.period}>
+                    {i > 0 && <span className="text-text-dim/50 mx-1">&rarr;</span>}
+                    <span className="text-text" title={tp.period}>
+                      {fmtNumber(tp.value)}{kpi.unit}
+                    </span>
+                  </span>
+                ))}
+                <span className="text-text-dim/50 ml-2 text-[10px]">
+                  ({kpi.trend[0]?.period} &ndash; {kpi.trend[kpi.trend.length - 1]?.period})
+                </span>
+              </p>
+            )}
             {kpi.computation && (
               <p className="mono">{kpi.computation}</p>
             )}
@@ -275,6 +389,42 @@ function DeltaValue({ v }: { v: number | null | undefined }) {
   if (v == null) return <span className="text-text-dim">-</span>;
   const color = v > 0 ? 'text-green' : v < 0 ? 'text-red' : 'text-text-dim';
   return <span className={color}>{fmtDelta(v)}</span>;
+}
+
+/* Coverage meter removed from BriefPage — backend coverage data still available via API */
+
+/* ─── KPI Family Group ─── */
+
+const FAMILY_LABEL: Record<string, string> = {
+  leading: 'Leading',
+  lagging: 'Lagging',
+  efficiency: 'Efficiency',
+  quality: 'Quality',
+  other: 'Other',
+};
+
+const FAMILY_COLOR: Record<string, string> = {
+  leading: 'text-accent',
+  lagging: 'text-text-dim',
+  efficiency: 'text-yellow',
+  quality: 'text-green',
+  other: 'text-text-dim',
+};
+
+function KPIFamilyGroup({ family, children }: { family: string; children: React.ReactNode }) {
+  return (
+    <>
+      <tr className="bg-surface-2">
+        <td
+          colSpan={5}
+          className={`px-3 py-1.5 text-xs uppercase tracking-wide font-medium ${FAMILY_COLOR[family] ?? 'text-text-dim'}`}
+        >
+          {FAMILY_LABEL[family] ?? family}
+        </td>
+      </tr>
+      {children}
+    </>
+  );
 }
 
 /* ─── Quality Scores ─── */
@@ -457,6 +607,11 @@ function HolderMapSection({ brief }: { brief: DecisionBrief }) {
                   {txn.value != null && txn.value > 0 && (
                     <span className="mono text-text-dim">
                       ({fmtDollars(txn.value)})
+                    </span>
+                  )}
+                  {txn.transaction_count > 1 && (
+                    <span className="text-text-dim">
+                      {txn.transaction_count} txns
                     </span>
                   )}
                   {txn.is_notable && (
