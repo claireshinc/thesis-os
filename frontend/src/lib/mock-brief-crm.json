@@ -1,0 +1,575 @@
+{
+    "ticker": "CRM",
+    "entity_name": "Salesforce, Inc.",
+    "sector": "saas",
+    "sector_display_name": "SaaS / Cloud Software",
+    "generated_at": "2026-02-14T09:20:54.737198Z",
+    "ev_build": {
+        "market_cap": {
+            "label": "Market Cap",
+            "value": 182320920000.0,
+            "computation": "price (189.72) x shares (961.0M)",
+            "source": {
+                "source_type": "10-K",
+                "filer": "Salesforce, Inc.",
+                "filing_date": "2025-03-05",
+                "section": null,
+                "accession_number": "0001108524-25-000006",
+                "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/0001108524-25-000006-index.htm",
+                "description": "EntityCommonStockSharesOutstanding from 10-K FY2025"
+            }
+        },
+        "total_debt": {
+            "label": "Total Debt",
+            "value": 9426000000.0,
+            "computation": "LT debt ($8.4B) + ST debt ($999.0M)",
+            "source": {
+                "source_type": "10-K",
+                "filer": "Salesforce, Inc.",
+                "filing_date": "2025-03-05",
+                "section": null,
+                "accession_number": "0001108524-25-000006",
+                "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/0001108524-25-000006-index.htm",
+                "description": "LongTermDebtNoncurrent from 10-K FY2025"
+            }
+        },
+        "cash": {
+            "label": "Cash & Equivalents",
+            "value": 8559312000.0,
+            "computation": "cash ($8.5B) + ST investments ($87.3M)",
+            "source": {
+                "source_type": "10-K",
+                "filer": "Salesforce, Inc.",
+                "filing_date": "2025-03-05",
+                "section": null,
+                "accession_number": "0001108524-25-000006",
+                "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/0001108524-25-000006-index.htm",
+                "description": "CashAndCashEquivalentsAtCarryingValue from 10-K FY2025"
+            }
+        },
+        "enterprise_value": 183187608000.0,
+        "summary": "EV = Market Cap ($182.3B) + Debt ($9.4B) - Cash ($8.6B) = $183.2B"
+    },
+    "market_implied": {
+        "implied_fcf_growth_10yr": 0.07836698036448374,
+        "wacc": 0.07869000000000001,
+        "wacc_build": "rf 3.37% + beta 1.0 x ERP 4.5% = 7.87%",
+        "fcf_used": 6313000000.0,
+        "fcf_computation": "FCF = OCF ($7.1B) - CapEx ($798.0M) = $6.3B",
+        "ocf_used": 7111000000.0,
+        "capex_used": 798000000.0,
+        "fcf_source": {
+            "source_type": "10-K",
+            "filer": "Salesforce, Inc.",
+            "filing_date": "2025-03-05",
+            "section": null,
+            "accession_number": "0001108524-25-000006",
+            "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/0001108524-25-000006-index.htm",
+            "description": "FCF = OCF ($7.1B) - CapEx ($798.0M) = $6.3B"
+        },
+        "ocf_source": {
+            "source_type": "10-K",
+            "filer": "Salesforce, Inc.",
+            "filing_date": "2025-03-05",
+            "section": null,
+            "accession_number": "0001108524-25-000006",
+            "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/0001108524-25-000006-index.htm",
+            "description": "NetCashProvidedByUsedInOperatingActivities from 10-K FY2025"
+        },
+        "capex_source": {
+            "source_type": "10-K",
+            "filer": "Salesforce, Inc.",
+            "filing_date": "2025-03-05",
+            "section": null,
+            "accession_number": "0001108524-25-000006",
+            "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/0001108524-25-000006-index.htm",
+            "description": "PaymentsToAcquirePropertyPlantAndEquipment from 10-K FY2025"
+        },
+        "terminal_growth": 0.025,
+        "ev_used": 183187608000.0,
+        "sensitivity": {
+            "wacc +1%": 0.10266802599795798,
+            "wacc -1%": 0.05112744166519218
+        }
+    },
+    "sector_kpis": [
+        {
+            "kpi_id": "nrr",
+            "label": "nrr",
+            "value": null,
+            "unit": "",
+            "period": "?",
+            "prior_value": null,
+            "yoy_delta": null,
+            "qoq_value": null,
+            "qoq_prior": null,
+            "qoq_delta": null,
+            "qoq_period": null,
+            "source": null,
+            "computation": null,
+            "note": "Requires filing text extraction \u2014 not available in XBRL"
+        },
+        {
+            "kpi_id": "cac_payback",
+            "label": "cac_payback",
+            "value": null,
+            "unit": "",
+            "period": "?",
+            "prior_value": null,
+            "yoy_delta": null,
+            "qoq_value": null,
+            "qoq_prior": null,
+            "qoq_delta": null,
+            "qoq_period": null,
+            "source": null,
+            "computation": null,
+            "note": "Requires filing text extraction \u2014 not available in XBRL"
+        },
+        {
+            "kpi_id": "rule_of_40",
+            "label": "Rule of 40",
+            "value": 38.48,
+            "unit": "%",
+            "period": "FY2025",
+            "prior_value": null,
+            "yoy_delta": null,
+            "qoq_value": null,
+            "qoq_prior": null,
+            "qoq_delta": null,
+            "qoq_period": null,
+            "source": {
+                "source_type": "10-K",
+                "filer": "Salesforce, Inc.",
+                "filing_date": "2025-03-05",
+                "section": null,
+                "accession_number": "0001108524-25-000006",
+                "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/0001108524-25-000006-index.htm",
+                "description": "RevenueFromContractWithCustomerExcludingAssessedTax from 10-K FY2025"
+            },
+            "computation": "rev_growth (18.3%) + FCF_margin (20.1%)",
+            "note": null
+        },
+        {
+            "kpi_id": "gross_margin",
+            "label": "Gross Margin",
+            "value": 73.33503444756315,
+            "unit": "%",
+            "period": "FY2025",
+            "prior_value": 73.47878604861845,
+            "yoy_delta": -0.14,
+            "qoq_value": 77.71,
+            "qoq_prior": 76.85,
+            "qoq_delta": 0.86,
+            "qoq_period": "Q3 FY2026",
+            "source": {
+                "source_type": "10-K",
+                "filer": "Salesforce, Inc.",
+                "filing_date": "2025-03-05",
+                "section": null,
+                "accession_number": "0001108524-25-000006",
+                "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/0001108524-25-000006-index.htm",
+                "description": "GrossProfit from 10-K FY2025"
+            },
+            "computation": "gross_profit ($23.0B) / revenue ($31.4B)",
+            "note": null
+        },
+        {
+            "kpi_id": "sbc_revenue",
+            "label": "SBC / Revenue",
+            "value": 10.46,
+            "unit": "%",
+            "period": "FY2025",
+            "prior_value": null,
+            "yoy_delta": null,
+            "qoq_value": 8.68,
+            "qoq_prior": 8.69,
+            "qoq_delta": -0.0,
+            "qoq_period": "Q3 FY2026",
+            "source": {
+                "source_type": "10-K",
+                "filer": "Salesforce, Inc.",
+                "filing_date": "2025-03-05",
+                "section": null,
+                "accession_number": "0001108524-25-000006",
+                "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/0001108524-25-000006-index.htm",
+                "description": "ShareBasedCompensation from 10-K FY2025"
+            },
+            "computation": "sbc ($3.3B) / revenue ($31.4B)",
+            "note": null
+        },
+        {
+            "kpi_id": "fcf_margin",
+            "label": "FCF Margin",
+            "value": 20.14,
+            "unit": "%",
+            "period": "FY2025",
+            "prior_value": null,
+            "yoy_delta": null,
+            "qoq_value": 18.84,
+            "qoq_prior": 8.1,
+            "qoq_delta": 10.74,
+            "qoq_period": "Q3 FY2026",
+            "source": {
+                "source_type": "10-K",
+                "filer": "Salesforce, Inc.",
+                "filing_date": "2025-03-05",
+                "section": null,
+                "accession_number": "0001108524-25-000006",
+                "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/0001108524-25-000006-index.htm",
+                "description": "NetCashProvidedByUsedInOperatingActivities from 10-K FY2025"
+            },
+            "computation": "(OCF $7.1B - capex $798.0M) / revenue $31.4B",
+            "note": null
+        },
+        {
+            "kpi_id": "revenue_growth",
+            "label": "Revenue Growth YoY",
+            "value": 18.35,
+            "unit": "%",
+            "period": "FY2025",
+            "prior_value": null,
+            "yoy_delta": null,
+            "qoq_value": 8.3,
+            "qoq_prior": 8.39,
+            "qoq_delta": -0.09,
+            "qoq_period": "Q3 FY2026",
+            "source": {
+                "source_type": "10-K",
+                "filer": "Salesforce, Inc.",
+                "filing_date": "2025-03-05",
+                "section": null,
+                "accession_number": "0001108524-25-000006",
+                "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/0001108524-25-000006-index.htm",
+                "description": "RevenueFromContractWithCustomerExcludingAssessedTax from 10-K FY2025"
+            },
+            "computation": "($31.4B / $26.5B - 1)",
+            "note": null
+        }
+    ],
+    "quality_scores": [
+        {
+            "name": "Beneish M-Score",
+            "value": -2.76,
+            "interpretation": "M-Score -2.76 < -1.78: Lower probability of earnings manipulation",
+            "components": {
+                "DSRI": 0.897,
+                "GMI": 1.002,
+                "AQI": 0.966,
+                "SGI": 1.183,
+                "DEPI": 0.806,
+                "SGAI": 1.0,
+                "TATA": -0.069,
+                "LVGI": 0.983
+            },
+            "source_periods": [
+                "FY2025",
+                "FY2024"
+            ]
+        }
+    ],
+    "excluded_scores": {
+        "altman_z": "Designed for manufacturing firms. Working capital and retained earnings ratios are meaningless for SaaS.",
+        "piotroski_f": "Asset turnover and leverage metrics don't apply. SaaS is asset-light with negative working capital by design.",
+        "greenblatt": "EBIT/EV is often negative for growth SaaS. Ranking by earnings yield would exclude the best companies."
+    },
+    "holder_map": {
+        "top_holders": [],
+        "holder_count": 0,
+        "insider_activity": [
+            {
+                "owner_name": "Harris Parker",
+                "owner_title": "Co-Founder and CTO, Slack",
+                "transaction_date": "2026-01-22",
+                "transaction_type": "option_exercise",
+                "shares": 1785.0,
+                "price_per_share": 0.0,
+                "value": null,
+                "shares_owned_after": 142696.0,
+                "is_10b5_1": false,
+                "is_discretionary": true,
+                "pct_of_holdings": 0.01250911027639177,
+                "is_notable": false,
+                "context_note": "Option exercise by Co-Founder and CTO, Slack. Routine compensation event \u2014 only notable if shares were retained.",
+                "source": {
+                    "source_type": "form4",
+                    "filer": "Harris Parker",
+                    "filing_date": "2026-01-23",
+                    "section": "Statement of Changes in Beneficial Ownership",
+                    "accession_number": "0001108524-26-000010",
+                    "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852426000010/0001108524-26-000010-index.htm",
+                    "description": ""
+                }
+            },
+            {
+                "owner_name": "Reddy Sundeep G.",
+                "owner_title": "EVP & Chief Accounting Officer",
+                "transaction_date": "2026-01-22",
+                "transaction_type": "option_exercise",
+                "shares": 487.0,
+                "price_per_share": 0.0,
+                "value": null,
+                "shares_owned_after": 14155.0,
+                "is_10b5_1": false,
+                "is_discretionary": true,
+                "pct_of_holdings": 0.03440480395619922,
+                "is_notable": false,
+                "context_note": "Option exercise by EVP & Chief Accounting Officer. Routine compensation event \u2014 only notable if shares were retained.",
+                "source": {
+                    "source_type": "form4",
+                    "filer": "Reddy Sundeep G.",
+                    "filing_date": "2026-01-23",
+                    "section": "Statement of Changes in Beneficial Ownership",
+                    "accession_number": "0001108524-26-000008",
+                    "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852426000008/0001108524-26-000008-index.htm",
+                    "description": ""
+                }
+            },
+            {
+                "owner_name": "Tallapragada Srinivas",
+                "owner_title": "Chief Eng/Cust Success Officer",
+                "transaction_date": "2026-01-22",
+                "transaction_type": "option_exercise",
+                "shares": 1785.0,
+                "price_per_share": 0.0,
+                "value": null,
+                "shares_owned_after": 48806.0,
+                "is_10b5_1": false,
+                "is_discretionary": true,
+                "pct_of_holdings": 0.0365733721263779,
+                "is_notable": false,
+                "context_note": "Option exercise by Chief Eng/Cust Success Officer. Routine compensation event \u2014 only notable if shares were retained.",
+                "source": {
+                    "source_type": "form4",
+                    "filer": "Tallapragada Srinivas",
+                    "filing_date": "2026-01-23",
+                    "section": "Statement of Changes in Beneficial Ownership",
+                    "accession_number": "0001108524-26-000006",
+                    "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852426000006/0001108524-26-000006-index.htm",
+                    "description": ""
+                }
+            },
+            {
+                "owner_name": "KROES NEELIE",
+                "owner_title": "Director",
+                "transaction_date": "2026-01-14",
+                "transaction_type": "sale",
+                "shares": 3893.0,
+                "price_per_share": 238.7043,
+                "value": 929275.84,
+                "shares_owned_after": 7299.0,
+                "is_10b5_1": false,
+                "is_discretionary": true,
+                "pct_of_holdings": 0.34783774124374556,
+                "is_notable": true,
+                "context_note": "Discretionary sale of 34.8% of holdings by Director. Significant size warrants attention.",
+                "source": {
+                    "source_type": "form4",
+                    "filer": "KROES NEELIE",
+                    "filing_date": "2026-01-15",
+                    "section": "Statement of Changes in Beneficial Ownership",
+                    "accession_number": "0001108524-26-000004",
+                    "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852426000004/0001108524-26-000004-index.htm",
+                    "description": ""
+                }
+            },
+            {
+                "owner_name": "Benioff Marc",
+                "owner_title": "Chair and CEO",
+                "transaction_date": "2026-01-13",
+                "transaction_type": "option_exercise",
+                "shares": 1.0,
+                "price_per_share": 215.17,
+                "value": 215.17,
+                "shares_owned_after": 11911572.0,
+                "is_10b5_1": false,
+                "is_discretionary": true,
+                "pct_of_holdings": 8.39519754403533e-08,
+                "is_notable": false,
+                "context_note": "Option exercise by Chair and CEO. Routine compensation event \u2014 only notable if shares were retained.",
+                "source": {
+                    "source_type": "form4",
+                    "filer": "Benioff Marc",
+                    "filing_date": "2026-01-14",
+                    "section": "Statement of Changes in Beneficial Ownership",
+                    "accession_number": "0001108524-26-000002",
+                    "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852426000002/0001108524-26-000002-index.htm",
+                    "description": ""
+                }
+            }
+        ],
+        "insider_summary": "5 insider transactions in recent filings: 0 purchases, 1 sales, 4 option exercises. Notable activity from: KROES NEELIE. Net discretionary selling totaling $929,276.",
+        "data_freshness": {
+            "insider_latest": "2026-01-22",
+            "insider_note": "Form 4 filings are due within 2 business days of the transaction.",
+            "13f_note": "13F filings report quarter-end holdings with a 45-day filing deadline. Data shown may be up to 4.5 months stale.",
+            "13f_warning": "Insufficient recent 13F data \u2014 holder map incomplete. Only 0 holder(s) filed within the last 2 quarters."
+        },
+        "holder_data_note": "Insufficient recent 13F data \u2014 holder map incomplete. Only 0 holder(s) filed within the last 2 quarters."
+    },
+    "red_flags": {
+        "red_flags": [
+            {
+                "flag": "Substantial stock-based compensation (SBC) embedded in multiple expense categories",
+                "severity": "medium",
+                "section": "Consolidated Statements of Operations",
+                "page": null,
+                "page_unverified": true,
+                "evidence": "Stock-based compensation is reported across Cost of sales, Selling and marketing expense, Research and development expense, and General and administrative expense for fiscal years 2025, 2024, and 2023. Specific dollar amounts are tagged in XBRL but not disclosed in narrative form in the text provided.",
+                "context": "For SaaS companies, SBC is a significant non-cash expense that can mask underlying profitability trends. Without explicit disclosure of total SBC amounts and SBC as a percentage of revenue, it is difficult to assess whether SBC is growing faster than revenue or becoming a larger drag on GAAP profitability. This is a common area where non-GAAP adjustments can become aggressive. Further review of MD&A and financial statement notes is needed to quantify total SBC and trend analysis.",
+                "source": {
+                    "source_type": "filing_text",
+                    "filer": "0001108524",
+                    "filing_date": null,
+                    "section": null,
+                    "accession_number": "0001108524-25-000006",
+                    "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/crm-20250131.htm",
+                    "description": "Full text of crm-20250131.htm (0001108524-25-000006)"
+                }
+            },
+            {
+                "flag": "Restructuring charges reported in fiscal 2025 and 2024",
+                "severity": "medium",
+                "section": "Consolidated Statements of Operations",
+                "page": null,
+                "page_unverified": true,
+                "evidence": "Restructuring charges are listed as a separate line item in the Consolidated Statements of Operations for fiscal years 2025 and 2024 (with zero or no restructuring charges in fiscal 2023, based on the member tags). Additional detail appears to be in a note labeled 'The Plan' with subcategories for 'Employee Severance' and 'Real Estate Exits and Office Space Reductions.'",
+                "context": "Recurring restructuring charges can signal ongoing operational or strategic challenges, especially in a growth company. If restructuring is frequent, it may indicate difficulty managing headcount or real estate in line with revenue growth. This should be monitored to ensure it is not masking underlying operational inefficiencies or being used to manage earnings. The fact that charges appear in two consecutive years warrants attention, though context on magnitude and nature is needed from the notes.",
+                "source": {
+                    "source_type": "filing_text",
+                    "filer": "0001108524",
+                    "filing_date": null,
+                    "section": null,
+                    "accession_number": "0001108524-25-000006",
+                    "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/crm-20250131.htm",
+                    "description": "Full text of crm-20250131.htm (0001108524-25-000006)"
+                }
+            },
+            {
+                "flag": "No explicit disclosure of total remaining performance obligations (RPO) or deferred revenue trends in text provided",
+                "severity": "medium",
+                "section": "Not explicitly cited in provided text",
+                "page": null,
+                "page_unverified": true,
+                "evidence": "The filing text provided does not contain narrative discussion or tables showing deferred revenue balances, current vs. non-current deferred revenue, or remaining performance obligations (RPO) and their growth rates. These are critical SaaS metrics typically found in MD&A or revenue recognition notes.",
+                "context": "For SaaS companies, deferred revenue and RPO are leading indicators of future revenue. Declining deferred revenue or RPO growing slower than reported revenue can signal pull-forward of revenue, slower bookings, or shorter contract durations. The absence of this disclosure in the excerpt provided prevents assessment of this key sector-specific risk. This should be verified in the full filing's MD&A section and revenue recognition note.",
+                "source": {
+                    "source_type": "filing_text",
+                    "filer": "0001108524",
+                    "filing_date": null,
+                    "section": null,
+                    "accession_number": "0001108524-25-000006",
+                    "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/crm-20250131.htm",
+                    "description": "Full text of crm-20250131.htm (0001108524-25-000006)"
+                }
+            },
+            {
+                "flag": "Significant ongoing strategic investment activity with mark-to-market impacts through P&L",
+                "severity": "low",
+                "section": "Strategic Investments / Fair Value Measurements",
+                "page": null,
+                "page_unverified": true,
+                "evidence": "The filing references 'strategic investments in both privately held and publicly traded companies' with valuations reported at fair value. References are made to 'Publicly Traded Equity Securities,' 'Privately Held Equity Securities,' and 'Privately Held Equity And Debt Securities' with gains/losses flowing through 'other income/expense' in fiscal 2025, 2024, and 2023. Specific impairments or write-downs in fiscal Q4 2025 and Q4 2024 are noted for privately held investments.",
+                "context": "Mark-to-market accounting for strategic investments can introduce significant volatility into 'other income/expense' and distort trends in operating performance. Salesforce's strategic investment portfolio is material, and gains or losses are not part of core operations. Investors should isolate these impacts when assessing operational trends. The disclosure notes write-downs in two consecutive Q4 periods, which may indicate portfolio risk, though the amounts and context are not fully detailed in the excerpt. This is a known issue for CRM but warrants monitoring for magnitude and trend.",
+                "source": {
+                    "source_type": "filing_text",
+                    "filer": "0001108524",
+                    "filing_date": null,
+                    "section": null,
+                    "accession_number": "0001108524-25-000006",
+                    "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/crm-20250131.htm",
+                    "description": "Full text of crm-20250131.htm (0001108524-25-000006)"
+                }
+            },
+            {
+                "flag": "Multiple acquisition integrations in fiscal 2025 (Spiff, Zoomin, Own) with intangible assets and goodwill",
+                "severity": "medium",
+                "section": "Business Combinations / Intangible Assets",
+                "page": null,
+                "page_unverified": true,
+                "evidence": "Acquisitions of Spiff Inc (February 2024), Zoomin Software Ltd. (November 2024), and Own Data Company Ltd. (November 2024) are disclosed. Intangible assets recorded include 'Developed Technology Rights,' 'Customer Relationships,' and 'Other Intangible Assets.' Total goodwill and intangible balances are tagged in XBRL but narrative amounts are not provided in excerpt.",
+                "context": "Multiple acquisitions in a single fiscal year increase integration risk, potential for goodwill impairment, and complexity in financial reporting. SaaS companies that rely heavily on M&A can face challenges realizing expected synergies or accurately valuing intangible assets. The filing states a clear acquisition strategy but also notes evaluation for 'value accretion' and operational efficiency. Investors should monitor for any future impairments or write-downs of acquired intangibles and goodwill, and assess whether acquisition-related expenses (e.g., amortization, integration costs) are growing. The presence of three acquisitions in fiscal 2025 is notable and should be tracked for execution risk.",
+                "source": {
+                    "source_type": "filing_text",
+                    "filer": "0001108524",
+                    "filing_date": null,
+                    "section": null,
+                    "accession_number": "0001108524-25-000006",
+                    "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/crm-20250131.htm",
+                    "description": "Full text of crm-20250131.htm (0001108524-25-000006)"
+                }
+            },
+            {
+                "flag": "Litigation and legal proceedings disclosed, including multiple plaintiff cases",
+                "severity": "low",
+                "section": "Legal Proceedings",
+                "page": null,
+                "page_unverified": true,
+                "evidence": "The XBRL data references multiple lawsuits: 'Slack Litigation,' 'Backpage Litigation,' 'S.M.A. v. Salesforce, Inc.,' 'A.S. v. Salesforce, Inc.,' 'T.S. v. Salesforce, Inc.,' and 'Jane Doe Cases.' Specific details, outcomes, or potential financial impact are not provided in the excerpt.",
+                "context": "Ongoing litigation, especially involving multiple plaintiffs or classes, can result in material financial liabilities, reputational damage, and management distraction. While legal proceedings are common for large public companies, the presence of multiple active cases warrants disclosure and monitoring. Investors should review the 'Legal Proceedings' section and any contingent liability disclosures in the notes for further detail on potential exposure. Severity is rated low absent specific quantified risk or adverse judgments, but this should be tracked.",
+                "source": {
+                    "source_type": "filing_text",
+                    "filer": "0001108524",
+                    "filing_date": null,
+                    "section": null,
+                    "accession_number": "0001108524-25-000006",
+                    "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/crm-20250131.htm",
+                    "description": "Full text of crm-20250131.htm (0001108524-25-000006)"
+                }
+            },
+            {
+                "flag": "Related party transactions involving CEO and co-founder (Marc Benioff and Parker Harris)",
+                "severity": "low",
+                "section": "Not explicitly detailed in excerpt; inferred from XBRL tags",
+                "page": null,
+                "page_unverified": true,
+                "evidence": "XBRL tags reference 'Marc Benioff Member' and 'Parker Harris Member' with date ranges in fiscal 2025, suggesting disclosure of transactions or arrangements. No narrative detail is provided in the excerpt.",
+                "context": "Related party transactions require careful disclosure and scrutiny to ensure they are conducted at arm's length and do not benefit insiders at the expense of shareholders. The presence of tags for named executives suggests some transaction or arrangement is disclosed elsewhere in the filing. This should be reviewed in the 'Certain Relationships and Related Transactions' section of the proxy or 10-K notes. Severity is low pending review of actual terms and materiality.",
+                "source": {
+                    "source_type": "filing_text",
+                    "filer": "0001108524",
+                    "filing_date": null,
+                    "section": null,
+                    "accession_number": "0001108524-25-000006",
+                    "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/crm-20250131.htm",
+                    "description": "Full text of crm-20250131.htm (0001108524-25-000006)"
+                }
+            }
+        ],
+        "clean_areas": [
+            "No auditor changes or going concern language identified",
+            "No change in revenue recognition policy or ASC 606 adoption issues noted as material in current period",
+            "No material weaknesses in internal controls disclosed (Item 9A references controls but no adverse findings in excerpt)",
+            "No customer concentration risk disclosed (filing explicitly states no customer exceeded 10% of revenue)",
+            "No unusual increase in 'other' income/expense beyond strategic investment volatility, which is disclosed",
+            "No indication of off-balance-sheet arrangements flagged as material in excerpt",
+            "Foreign exchange derivative instruments disclosed as non-designated and measured at fair value; appears routine for multinational operations"
+        ],
+        "filing_source": {
+            "source_type": "filing_text",
+            "filer": "0001108524",
+            "filing_date": null,
+            "section": null,
+            "accession_number": "0001108524-25-000006",
+            "url": "https://www.sec.gov/Archives/edgar/data/1108524/000110852425000006/crm-20250131.htm",
+            "description": "Full text of crm-20250131.htm (0001108524-25-000006)"
+        }
+    },
+    "model_inputs": {
+        "wacc": 0.07869000000000001,
+        "risk_free_rate": 0.03369000000000001,
+        "beta": 1.0,
+        "equity_risk_premium": 0.045,
+        "terminal_growth": 0.025,
+        "sector_template": "saas",
+        "filing_used": "0001108524-25-000006",
+        "filing_date": "2025-03-05",
+        "data_freshness": {
+            "insider_latest": "2026-01-22",
+            "insider_note": "Form 4 filings are due within 2 business days of the transaction.",
+            "13f_note": "13F filings report quarter-end holdings with a 45-day filing deadline. Data shown may be up to 4.5 months stale.",
+            "13f_warning": "Insufficient recent 13F data \u2014 holder map incomplete. Only 0 holder(s) filed within the last 2 quarters.",
+            "filing_analyzed": "2025-03-05",
+            "filing_type": "10-K"
+        }
+    }
+}

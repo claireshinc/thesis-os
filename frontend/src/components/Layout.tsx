@@ -40,6 +40,17 @@ export default function Layout() {
 
       {/* Main content */}
       <main className="flex-1 overflow-y-auto">
+        <div className="bg-amber-900/30 border-b border-amber-700/40 px-4 py-2 text-xs text-amber-200/80 flex items-center justify-between">
+          <span>Static demo — try querying <strong>CRM</strong> for a sample brief. Other tickers require the backend.</span>
+          <a
+            href="https://github.com/claireshinc/thesis-os"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:text-amber-100 ml-3"
+          >
+            View on GitHub
+          </a>
+        </div>
         <Outlet />
       </main>
     </div>

@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { HashRouter, Routes, Route } from 'react-router-dom';
 import Layout from './components/Layout';
 import BriefPage from './pages/BriefPage';
 import ThesisPage from './pages/ThesisPage';
@@ -6,7 +6,7 @@ import FeedPage from './pages/FeedPage';
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <HashRouter>
       <Routes>
         <Route element={<Layout />}>
           <Route path="/" element={<BriefPage />} />
@@ -14,6 +14,6 @@ export default function App() {
           <Route path="/feed" element={<FeedPage />} />
         </Route>
       </Routes>
-    </BrowserRouter>
+    </HashRouter>
   );
 }

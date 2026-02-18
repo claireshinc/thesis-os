@@ -2,7 +2,6 @@ import { useState } from 'react';
 import TickerInput from '../components/TickerInput';
 import SectionHeader from '../components/SectionHeader';
 import CitationTooltip from '../components/CitationTooltip';
-import StatusLight from '../components/StatusLight';
 import { getBrief, exportBriefPdfUrl, exportBriefMdUrl } from '../lib/api';
 import { fmtDollars, fmtPct, fmtPctRaw, fmtDelta, fmtNumber } from '../lib/format';
 import type { DecisionBrief, KPI, QualityScore, Segment } from '../lib/types';

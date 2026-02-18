@@ -8,7 +8,7 @@ interface Props {
 
 export default function CitationTooltip({ source, children }: Props) {
   const [show, setShow] = useState(false);
-  const timeout = useRef<ReturnType<typeof setTimeout>>();
+  const timeout = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   if (!source) return <>{children}</>;
 
