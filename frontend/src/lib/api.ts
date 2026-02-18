@@ -29,26 +29,14 @@ export async function getBrief(
 ): Promise<DecisionBrief> {
   const key = ticker.toUpperCase();
   const mock = DEMO_BRIEFS[key];
+  if (mock) return mock;
 
   const params = new URLSearchParams();
   if (sector) params.set('sector', sector);
   const qs = params.toString();
-
-  try {
-    return await fetchJSON<DecisionBrief>(
-      `${BASE}/brief/${encodeURIComponent(ticker)}${qs ? `?${qs}` : ''}`,
-    );
-  } catch (err) {
-    // Only fall back to mock on network failures (backend unreachable),
-    // not on API errors (4xx/5xx) which are thrown as Error with status codes.
-    const isNetworkError =
-      err instanceof TypeError || (err instanceof DOMException && err.name === 'AbortError');
-    if (isNetworkError && mock) return mock;
-    if (isNetworkError) {
-      throw new Error(`Backend unavailable. Try "CRM" for a demo brief.`);
-    }
-    throw err;
-  }
+  return fetchJSON<DecisionBrief>(
+    `${BASE}/brief/${encodeURIComponent(ticker)}${qs ? `?${qs}` : ''}`,
+  );
 }
 
 // Thesis CRUD
